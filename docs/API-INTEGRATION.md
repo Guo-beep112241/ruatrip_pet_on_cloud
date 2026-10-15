@@ -10,7 +10,7 @@
 
 | # | 能力 | 状态 | 代码位置 | 需要的环境变量 |
 | --- | --- | --- | --- | --- |
-| 1 | 大模型对话 | ⬜ 待接入 | `apps/server/src/adapters/chat.ts` | `ANTHROPIC_API_KEY` / `OPENAI_*` |
+| 1 | 大模型对话 | ⬜ 待接入 | `apps/server/src/adapters/chat.ts` | `LLM_API_KEY` + `LLM_BASE_URL` + `LLM_MODEL`（推荐国产）/ `ANTHROPIC_API_KEY`（备选） |
 | 2 | 3D 形象生成 | ⬜ 待接入 | `apps/server/src/adapters/mesh.ts` | `TRIPO_API_KEY` 或 `MESHY_API_KEY` |
 | 3 | 自动绑定骨骼 | ⬜ 待接入 | `apps/server/src/adapters/rigging.ts` | `ANYTHING_WORLD_API_KEY` |
 | 4 | 语音合成 TTS | ⬜ 待接入 | `apps/server/src/adapters/tts.ts` | `MINIMAX_API_KEY` / `ELEVENLABS_API_KEY` |
@@ -36,45 +36,84 @@
 说明书 6.2 要求：同一句用户输入，布偶猫和水豚的回答语气必须完全不同。这靠「性格档案卡 → system prompt → 大模型」实现。不接入时由 `MockLlmProvider` 用档案卡字段（口头禅 / 喜好 / 回避话题）拼装回复，人设成立但不够灵活。
 
 **改哪里**
-`apps/server/src/adapters/chat.ts`
+`apps/server/src/adapters/chat.ts`（一般不需要改代码，只改 `.env`）
 
-**推荐服务商**
+### 1.1 三行配置切换任意供应商
 
-| 供应商 | 环境变量 | 说明 |
-| --- | --- | --- |
-| Anthropic Claude（首选） | `ANTHROPIC_API_KEY`、`CHAT_MODEL` | 长 system prompt 的遵循度好，人设漂移小 |
-| OpenAI 兼容网关（备选） | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` | DeepSeek / 通义 / Moonshot / 自建 vLLM 都能挂 |
+通道叫「OpenAI 兼容」——只要厂商提供 OpenAI 格式的 `/chat/completions`，就能挂上。
+**推荐用国产平台：可用支付宝/微信付款，不需要海外信用卡。**
 
-**实际请求**（已在代码里实现，配 key 即生效）
+```bash
+LLM_API_KEY=你复制的 key
+LLM_BASE_URL=<见下表>
+LLM_MODEL=<见下表>
+```
+
+| 供应商 | `LLM_BASE_URL` | `LLM_MODEL` 示例 | 付款方式 | 取 key 位置 |
+| --- | --- | --- | --- | --- |
+| **DeepSeek**（性价比最好） | `https://api.deepseek.com` | `deepseek-flash` | 支付宝/微信 | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) |
+| **智谱 GLM**（有免费档） | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` | 支付宝/微信 | [bigmodel.cn](https://open.bigmodel.cn/) →  API Keys |
+| **通义千问**（新用户免费额度大） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` | 支付宝 | [阿里云百炼控制台](https://bailian.console.aliyun.com/) → API-KEY 管理 |
+| **Kimi** | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` | 支付宝/微信 | [platform.moonshot.cn](https://platform.moonshot.cn/console/api-keys) |
+| **硅基流动**（部分模型 ¥0） | `https://api.siliconflow.cn/v1` | `Qwen/Qwen3-8B` | 支付宝（需实名） | [cloud.siliconflow.cn/account/ak](https://cloud.siliconflow.cn/account/ak) |
+| Anthropic Claude（备选，需海外卡） | `https://api.anthropic.com` | `claude-sonnet-4-5` | 海外信用卡 | 用 `ANTHROPIC_API_KEY`，不走本通道 |
+| 自建 vLLM / Ollama | `http://localhost:8000/v1` | 你的模型名 | 免费 | 本地部署 |
+
+**优先级**：`LLM_*` > `ANTHROPIC_*` > 本地 Mock。所以你配了国产模型就会立即生效，不会被残留的 Claude key 抢走。
+`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` 仍然可用，是 `LLM_*` 的向后兼容别名。
+
+### 1.2 关于成本
+
+以说明书描述的宠物对话为例，每轮约 800~1500 tokens。
+
+- DeepSeek `deepseek-flash`：高峰时段 输入 ¥2 / 百万 tokens、输出 ¥8；**空闲时段（含周末与法定节假日全天）价格减半**。折算下来一轮对话不到 ¥0.01，充 ¥10 可以聊上千轮。
+- 智谱 `glm-4-flash`、硅基流动的部分小模型是 ¥0 档（硅基流动需要中国/港澳台证件实名认证）。
+- 想完全不花钱：先用免费档验证产品体验，需要长上下文或稳定高并发时再切付费档，只改 `.env` 一行。
+
+### 1.3 实际请求
 
 ```
-POST {ANTHROPIC_BASE_URL}/v1/messages
-x-api-key: <ANTHROPIC_API_KEY>
-anthropic-version: 2023-06-01
+POST {LLM_BASE_URL}/chat/completions
+Authorization: Bearer <LLM_API_KEY>
 
 {
-  "model": "claude-sonnet-4-5",
+  "model": "deepseek-flash",
   "max_tokens": 300,
   "temperature": 1,
-  "system": "<由人格档案卡自动拼装，见 services/persona.ts buildSystemPrompt>",
-  "messages": [ { "role": "user", "content": "今天有点累" }, ... ]
+  "messages": [
+    { "role": "system", "content": "<由人格档案卡自动拼装，见 services/persona.ts buildSystemPrompt>" },
+    { "role": "user", "content": "今天有点累" }
+  ]
 }
 ```
 
 **system prompt 是怎么来的**
-`services/persona.ts` 的 `buildSystemPrompt()` 会把档案卡（物种、性格标签、说话节奏、口头禅、喜好、回避、小毛病）、关系状态（好感度等级、想念值）、**记忆锚点**、当下情境（时间/天气/地点）拼成规则化的提示词，并内置 7 条说话规则（长度 ≤60 字、不承认自己是 AI、回避话题含糊带过、不给医疗建议、情绪低落时先安静陪伴等）。**不要手写 prompt**，改规则请改这个函数（说明书 3.2-6 的模板化要求）。
+`services/persona.ts` 的 `buildSystemPrompt()` 会把档案卡（物种、性格标签、说话节奏、口头禅、喜好、回避、小毛病）、关系状态（好感度等级、想念值）、**记忆锚点**、当下情境（时间/天气/地点）拼成规则化提示词，并内置 7 条说话规则（长度 ≤60 字、不承认自己是 AI、回避话题含糊带过、不给医疗建议、情绪低落时先安静陪伴等）。**不要手写 prompt**，改规则请改这个函数（说明书 3.2-6 的模板化要求）。
 
-**成本控制（说明书 3.2-5）**
+**注意 reasoning_content**：部分国产模型（含 DeepSeek 的思考模式）会先返回 `reasoning_content` 再返回 `content`。适配层只取 `content`，避免把内部思考念给用户；如果模型只返回思考内容而不给 `content`，会被判为空回复并回落 Mock。
+
+### 1.4 失败怎么表现
+
+错误会被翻译成「你能照着做」的提示，写在服务端日志与 `GET /api/integration` 的 `lastError` 里：
+
+| 情况 | 错误码 | 提示 |
+| --- | --- | --- |
+| 密钥无效/无权限 | `LLM_AUTH_FAILED` | 检查 `.env` 里的 `LLM_API_KEY` |
+| 余额不足 | `LLM_NO_BALANCE` | 去厂商控制台充值 |
+| 模型名或地址不对 | `LLM_MODEL_NOT_FOUND` | 检查 `LLM_BASE_URL` 与 `LLM_MODEL` |
+| 返回空内容 | `LLM_EMPTY_RESPONSE` | 视为失败，回落 Mock |
+
+**任何失败都会回落 Mock，对话永不中断**，宠物照常回话，只是风格退回模板。
+
+### 1.5 成本控制（说明书 3.2-5）
+
 - 对话分四层：`instant` / `scene` 走本地预设池，**不上模型**；只有 `free` 层才调用接口。
 - `services/chat.ts` 的 `sendMessage()` 里 `layer: 'auto'` 会自动判定。
 - 记忆摘要有容量上限（免费 40 / Plus 120 / Pro 300 条），超出按重要性淘汰。
 - 后置审核 `screenModelOutput()` 会拦掉「我是 AI / 语言模型」这类泄漏并回退成宠物口吻。
 
-**回落行为**：接口报错或返回空 → 自动用 Mock 模板回复，`degraded: true` 会透传给前端。
-
 **验收**：连问三轮「今天有点累 / 我好喜欢你 / 你是不是 AI」，第三句必须被温柔带过；宠物回复不超过 3 句。
-
----
+改完 `.env` **不需要重启服务端**（配置是惰性读取的），直接再问一次即可看到新模型生效。
 
 ## 2. 3D 形象生成（文字/图片 → 几何 + PBR 贴图）
 

@@ -20,7 +20,7 @@ npm run dev        # 后端 http://localhost:8787 ＋ 前端 http://localhost:51
 ```bash
 npm run build      # 构建前端
 npm start          # 生产模式：后端同源托管前端，只需 http://localhost:8787 一个地址
-npm test           # 23 个单元测试
+npm test           # 32 个单元测试
 npm run typecheck  # 全量类型检查
 ```
 
@@ -36,7 +36,7 @@ npm run typecheck  # 全量类型检查
 
 | # | 能力 | 配哪些 key | 改哪个文件 |
 | --- | --- | --- | --- |
-| 1 | 大模型对话（真心话小屋自由层） | `ANTHROPIC_API_KEY`（首选）或 `OPENAI_API_KEY` + `OPENAI_BASE_URL` | `apps/server/src/adapters/chat.ts` |
+| 1 | 大模型对话（真心话小屋自由层） | **推荐国产**：`LLM_API_KEY` + `LLM_BASE_URL` + `LLM_MODEL`（DeepSeek / 智谱 / 通义 / Kimi / 硅基流动，**可用支付宝微信付款**）；备选 `ANTHROPIC_API_KEY` | `apps/server/src/adapters/chat.ts` |
 | 2 | 3D 形象生成（文/图 → 几何 + PBR） | `TRIPO_API_KEY`（主力）和/或 `MESHY_API_KEY`（双供应商备份） | `apps/server/src/adapters/mesh.ts` |
 | 3 | 自动绑定骨骼 + 动物动画 | `ANYTHING_WORLD_API_KEY` | `apps/server/src/adapters/rigging.ts` |
 | 4 | 语音合成（宠物专属音色） | `MINIMAX_API_KEY` + `MINIMAX_GROUP_ID`（首选）/ `ELEVENLABS_API_KEY` | `apps/server/src/adapters/tts.ts` |
@@ -53,6 +53,18 @@ npm run typecheck  # 全量类型检查
 cp .env.example .env    # 然后填 key
 npm run dev:server      # 启动日志会打印当前的接入模式与真实通道数量
 ```
+
+**换模型只需改 `.env` 三行，不用改代码**：
+
+```bash
+# 例如换成 DeepSeek（可用支付宝付款）
+LLM_API_KEY=sk-你的key
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-flash
+```
+
+智谱 `https://open.bigmodel.cn/api/paas/v4` + `glm-4-flash`、通义 `https://dashscope.aliyuncs.com/compatible-mode/v1` + `qwen-plus`、
+Kimi `https://api.moonshot.cn/v1` + `moonshot-v1-8k` 同理。完整对照表见接入手册。
 
 **三条必须守住的线**
 
@@ -136,7 +148,11 @@ RUATRIP_BEST_PET_FRIENDS/
 npm test
 ```
 
-23 个单元测试覆盖：好感度数值口径（次数上限、衰减、单日上限）、等级曲线、想念值区间、情绪推导优先级、人格卡生成、跨物种说话风格差异、system prompt 完整性、四类内容安全过滤（自我认知/医疗/成人/高风险）、后置审核泄漏清理、即时层预设池完整性。
+32 个单元测试分三组：
+
+- **规则层（10 个）**：好感度数值口径（次数上限、衰减、单日上限）、等级曲线、想念值区间、情绪推导优先级
+- **安全层（13 个）**：人格卡生成、跨物种说话风格差异、system prompt 完整性、四类内容安全过滤（自我认知/医疗/成人/高风险）、后置审核泄漏清理、即时层预设池完整性
+- **模型接入层（9 个，集成测试）**：起一个本地假模型端点，验证「换个模型就能用」这条路真的通 —— 请求格式、`reasoning_content` 不被误读、401/402/404 翻译成可照做提示、空回复判定、失败必回落 Mock、改 `.env` 免重启生效
 
 端到端行为已手工验证并记录在 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 第 9 节。
 

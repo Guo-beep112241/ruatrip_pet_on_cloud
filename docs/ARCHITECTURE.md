@@ -204,7 +204,17 @@ packages/theme/src/tokens.ts        （唯一事实来源：色彩/圆角/字号
 
 ---
 
-## 9. 已验证的行为（自测记录）
+## 9. 自动化测试覆盖
+
+`npm test` 共 32 个用例，分三组：
+
+| 文件 | 数量 | 覆盖 |
+| --- | --- | --- |
+| `packages/shared/tests/rules.test.ts` | 10 | 好感度数值口径、等级曲线、想念值、情绪推导优先级 |
+| `apps/server/tests/persona.test.ts` | 13 | 人格卡、跨物种风格差异、system prompt 完整性、四类内容安全、后置审核、预设池 |
+| `apps/server/tests/llm-provider.test.ts` | 9 | **集成测试**：本地假模型端点验证请求格式、`reasoning_content` 隔离、401/402/404 错误翻译、空回复判定、失败回落、惰性配置免重启 |
+
+## 10. 已验证的行为（手工自测记录）
 
 ```
 ✓ 问卷 8 题 → 偏好向量（confidence 计算、inferred 维度标注）
@@ -223,11 +233,12 @@ packages/theme/src/tokens.ts        （唯一事实来源：色彩/圆角/字号
 ✓ 云代养：托付记录 + 回来后的台词
 ✓ 订阅：模拟开通，price 按月/年正确
 ✓ 静态托管 + SPA 回退：/ 、/hut、hash 深链均 200
+✓ 换模型：把 LLM_BASE_URL 指向本地假端点后，对话立即从 Mock 切到真实通道，无需重启
 ```
 
 ---
 
-## 10. 本地开发速查
+## 11. 本地开发速查
 
 ```bash
 npm install                # 安装依赖（首次约 3 分钟）
