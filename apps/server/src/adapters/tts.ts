@@ -4,7 +4,7 @@
  *  - ASR：前端优先用 Web Speech Recognition（零成本）；服务端 ASR 通道用于方言/口音容错场景
  */
 import { config } from '../config.ts';
-import { logAdapter, toIntegrationStatus, type ProviderMeta } from './types.ts';
+import { logAdapter, isConfigured, toIntegrationStatus, type ProviderMeta } from './types.ts';
 
 export interface TtsRequest {
   text: string;
@@ -46,7 +46,9 @@ class MiniMaxTtsProvider implements TtsProvider {
     envKeys: ['MINIMAX_API_KEY', 'MINIMAX_GROUP_ID'],
     docsUrl: 'https://www.minimax.io/platform/document/T2A%20V2',
     note: '中文情绪表现好，按性格分配音色（慵懒低音/活泼高音/软糯/沙哑）。',
-    configured: Boolean(config.minimax.apiKey),
+    get configured() {
+      return Boolean(config.minimax.apiKey);
+    },
   };
 
   async synthesize(req: TtsRequest): Promise<TtsResult> {
@@ -86,7 +88,9 @@ class ElevenLabsTtsProvider implements TtsProvider {
     envKeys: ['ELEVENLABS_API_KEY'],
     docsUrl: 'https://elevenlabs.io/docs/api-reference/text-to-speech',
     note: '准确率与速度优秀，适合作为 MiniMax 的备份链路。',
-    configured: Boolean(config.elevenlabs.apiKey),
+    get configured() {
+      return Boolean(config.elevenlabs.apiKey);
+    },
   };
 
   async synthesize(req: TtsRequest): Promise<TtsResult> {
@@ -134,7 +138,7 @@ class BrowserTtsFallback implements TtsProvider {
 const providers: TtsProvider[] = [new MiniMaxTtsProvider(), new ElevenLabsTtsProvider(), new BrowserTtsFallback()];
 export const ttsProviders = () => providers;
 export function activeTtsProvider(): TtsProvider {
-  return providers.find((p) => p.meta.configured) ?? providers[providers.length - 1]!;
+  return providers.find((p) => isConfigured(p.meta)) ?? providers[providers.length - 1]!;
 }
 export const ttsIntegrationStatus = () => providers.map((p) => toIntegrationStatus(p.meta));
 
@@ -148,6 +152,8 @@ export const asrMeta: ProviderMeta = {
   envKeys: ['ASR_API_KEY', 'ASR_BASE_URL', 'ASR_MODEL'],
   docsUrl: '/docs/API-INTEGRATION.md',
   note: '前端默认使用浏览器 SpeechRecognition（零成本、低延迟）；配置服务端通道是为了方言与口音容错。',
-  configured: Boolean(config.asr.apiKey && config.asr.baseUrl),
+  get configured() {
+    return Boolean(config.asr.apiKey && config.asr.baseUrl);
+  },
 };
 export const asrIntegrationStatus = () => [toIntegrationStatus(asrMeta)];

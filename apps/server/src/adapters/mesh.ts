@@ -10,7 +10,7 @@
  * ⚠️ 需要接入 API 的地方：见 docs/API-INTEGRATION.md §2
  */
 import { config } from '../config.ts';
-import { logAdapter, toIntegrationStatus, type ProviderMeta } from './types.ts';
+import { logAdapter, isConfigured, toIntegrationStatus, type ProviderMeta } from './types.ts';
 
 export interface MeshRequest {
   /** 物种提示词 */
@@ -59,7 +59,9 @@ class TripoProvider implements MeshProvider {
     envKeys: ['TRIPO_API_KEY'],
     docsUrl: 'https://platform.tripo3d.ai/docs/introduction',
     note: '一次调用可走完「文/图生 3D → 贴图 → 自动绑定」，接口完整、单次成本低，适合 MVP 主力链路。',
-    configured: Boolean(config.tripo.apiKey),
+    get configured() {
+      return Boolean(config.tripo.apiKey);
+    },
   };
 
   async submit(req: MeshRequest): Promise<MeshSubmitResult> {
@@ -129,7 +131,9 @@ class MeshyProvider implements MeshProvider {
     envKeys: ['MESHY_API_KEY'],
     docsUrl: 'https://docs.meshy.ai/en/api/text-to-3d',
     note: '工程成熟度高、有企业级合规认证，适合规模化调用；作为 Tripo 的双供应商备份，规避单点风险。',
-    configured: Boolean(config.meshy.apiKey),
+    get configured() {
+      return Boolean(config.meshy.apiKey);
+    },
   };
 
   async submit(req: MeshRequest): Promise<MeshSubmitResult> {
@@ -221,7 +225,7 @@ export function meshProviders(): MeshProvider[] {
   return providers;
 }
 export function activeMeshProvider(): MeshProvider {
-  return providers.find((p) => p.meta.configured) ?? providers[providers.length - 1]!;
+  return providers.find((p) => isConfigured(p.meta)) ?? providers[providers.length - 1]!;
 }
 export const meshIntegrationStatus = () => providers.map((p) => toIntegrationStatus(p.meta));
 

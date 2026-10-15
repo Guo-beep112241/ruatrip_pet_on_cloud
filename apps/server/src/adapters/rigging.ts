@@ -5,7 +5,7 @@
  * 因此本层的策略是「能绑则绑，不能绑就套通用骨架」，保证体验不中断。
  */
 import { config } from '../config.ts';
-import { logAdapter, toIntegrationStatus, type ProviderMeta } from './types.ts';
+import { logAdapter, isConfigured, toIntegrationStatus, type ProviderMeta } from './types.ts';
 
 export type SkeletonTemplate = 'quadruped' | 'biped' | 'avian';
 
@@ -52,7 +52,9 @@ class AnythingWorldProvider implements RigProvider {
     envKeys: ['ANYTHING_WORLD_API_KEY'],
     docsUrl: 'https://docs.anything.world/',
     note: '关键推荐：专门面向非人形对象、覆盖大量动物种类，正好匹配「物种不限于猫狗」的需求。',
-    configured: Boolean(config.anythingWorld.apiKey),
+    get configured() {
+      return Boolean(config.anythingWorld.apiKey);
+    },
   };
 
   async rig(req: RigRequest): Promise<RigResult> {
@@ -116,7 +118,10 @@ class MockRigProvider implements RigProvider {
     envKeys: [],
     docsUrl: '/docs/API-INTEGRATION.md',
     note: 'Mock 模式下按物种族直接套用四足/鸟类骨架与通用动作集；接入 Anything World 后同一接口直接替换。',
-    configured: Boolean(config.anythingWorld.apiKey) ? false : true,
+    get configured() {
+      // 只有装了 Anything World 才轮到兜底骨架；否则 Mock 绑定才是正规路径
+      return !config.anythingWorld.apiKey;
+    },
   };
 
   async rig(req: RigRequest): Promise<RigResult> {
@@ -134,6 +139,6 @@ class MockRigProvider implements RigProvider {
 const providers: RigProvider[] = [new AnythingWorldProvider(), new MockRigProvider(), new FallbackRigProvider()];
 export const rigProviders = () => providers;
 export function activeRigProvider(): RigProvider {
-  return providers.find((p) => p.meta.configured) ?? providers[providers.length - 1]!;
+  return providers.find((p) => isConfigured(p.meta)) ?? providers[providers.length - 1]!;
 }
 export const rigIntegrationStatus = () => providers.map((p) => toIntegrationStatus(p.meta));

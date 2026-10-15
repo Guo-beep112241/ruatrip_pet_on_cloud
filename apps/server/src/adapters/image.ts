@@ -7,7 +7,7 @@
  * ⚠️ 需要接入 API 的地方：见 docs/API-INTEGRATION.md §6
  */
 import { config } from '../config.ts';
-import { logAdapter, toIntegrationStatus, type ProviderMeta } from './types.ts';
+import { logAdapter, isConfigured, toIntegrationStatus, type ProviderMeta } from './types.ts';
 
 export interface ComposeRequest {
   /** 实景照片（可为空 → 纯生成） */
@@ -50,7 +50,9 @@ class LiveImageProvider implements ImageProvider {
     envKeys: ['IMAGE_COMPOSER_API_KEY', 'IMAGE_COMPOSER_BASE_URL'],
     docsUrl: '/docs/API-INTEGRATION.md#6-图像合成',
     note: '通用契约：传入实景照 + 母版参考图 + 光影参数，返回合成图。角色锁定要求带 masterId。',
-    configured: Boolean(config.imageComposer.apiKey && config.imageComposer.baseUrl),
+    get configured() {
+      return Boolean(config.imageComposer.apiKey && config.imageComposer.baseUrl);
+    },
   };
 
   async compose(req: ComposeRequest): Promise<ComposeResult> {
@@ -148,6 +150,6 @@ function escapeXml(input: string): string {
 const providers: ImageProvider[] = [new LiveImageProvider(), new LocalComposeFallback()];
 export const imageProviders = () => providers;
 export function activeImageProvider(): ImageProvider {
-  return providers.find((p) => p.meta.configured) ?? providers[providers.length - 1]!;
+  return providers.find((p) => isConfigured(p.meta)) ?? providers[providers.length - 1]!;
 }
 export const imageIntegrationStatus = () => providers.map((p) => toIntegrationStatus(p.meta));

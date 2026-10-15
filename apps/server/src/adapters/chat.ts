@@ -9,7 +9,7 @@
  * ⚠️ 需要接入 API 的地方：见 docs/API-INTEGRATION.md §1
  */
 import { config } from '../config.ts';
-import { logAdapter, toIntegrationStatus, type ProviderMeta } from './types.ts';
+import { isConfigured, logAdapter, toIntegrationStatus, type ProviderMeta } from './types.ts';
 
 export interface ChatTurn {
   role: 'user' | 'assistant';
@@ -48,7 +48,9 @@ class AnthropicProvider implements LlmProvider {
     envKeys: ['ANTHROPIC_API_KEY', 'CHAT_MODEL'],
     docsUrl: 'https://docs.anthropic.com/en/api/messages',
     note: '性格档案卡拼装成 system prompt，返回宠物口吻文本；同一句输入不同人设回答完全不同。',
-    configured: Boolean(config.anthropic.apiKey),
+    get configured() {
+      return Boolean(config.anthropic.apiKey);
+    },
   };
 
   async complete(req: LlmRequest): Promise<LlmResponse> {
@@ -93,44 +95,63 @@ class AnthropicProvider implements LlmProvider {
 /* ------------------------------------------------------------------ */
 /* 2. OpenAI 兼容网关                                                   */
 /* ------------------------------------------------------------------ */
+/* 2. 通用「OpenAI 兼容」通道（国产模型首选，无需海外信用卡）              */
+/* ------------------------------------------------------------------ */
 class OpenAiCompatProvider implements LlmProvider {
   readonly meta: ProviderMeta = {
     capability: 'chat',
     id: 'openai-compatible',
-    label: 'OpenAI 兼容网关（备选对话通道）',
-    envKeys: ['OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL'],
-    docsUrl: 'https://platform.openai.com/docs/api-reference/chat',
-    note: 'DeepSeek / 通义 / Moonshot / 自建 vLLM 都能挂；配置后自动优先于 Anthropic 之外的兜底。',
-    configured: Boolean(config.openaiCompat.apiKey && config.openaiCompat.baseUrl),
+    label: 'OpenAI 兼容通道（DeepSeek / 智谱 / 通义 / Kimi / 硅基流动）',
+    envKeys: ['LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL'],
+    docsUrl: '/docs/API-INTEGRATION.md#1-大模型对话真心话小屋自由层',
+    note: '只要厂商提供 OpenAI 兼容端点就能挂上，一行配置切换供应商。国产平台可用支付宝/微信付款。',
+    get configured() {
+      return Boolean(config.llm.apiKey && config.llm.baseUrl);
+    },
   };
 
   async complete(req: LlmRequest): Promise<LlmResponse> {
-    const base = config.openaiCompat.baseUrl.replace(/\/$/, '');
+    const base = config.llm.baseUrl.replace(/\/$/, '');
     const res = await fetch(`${base}/chat/completions`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${config.openaiCompat.apiKey}`,
+        authorization: `Bearer ${config.llm.apiKey}`,
       },
       body: JSON.stringify({
-        model: config.openaiCompat.model || 'gpt-4o-mini',
+        model: config.llm.model || 'deepseek-flash',
         max_tokens: req.maxTokens ?? 320,
         temperature: req.temperature ?? 1,
         messages: [{ role: 'system', content: req.system }, ...req.turns],
       }),
     });
     if (!res.ok) {
-      const text = await res.text();
-      logAdapter('openai-compat error', `${res.status} ${text.slice(0, 200)}`);
-      throw new Error(`openai-compat ${res.status}`);
+      const text = (await res.text()).slice(0, 300);
+      logAdapter('llm error', `${res.status} ${text}`);
+      // 把最常见的两种失败翻译成「用户能照着做」的提示
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(`LLM_AUTH_FAILED：密钥无效或没有权限（${res.status}）。请检查 .env 里的 LLM_API_KEY。`);
+      }
+      if (res.status === 402 || /insufficient|balance|quota|欠费|余额/i.test(text)) {
+        throw new Error(`LLM_NO_BALANCE：账户余额不足（${res.status}）。请到厂商控制台充值。`);
+      }
+      if (res.status === 404) {
+        throw new Error(`LLM_MODEL_NOT_FOUND：模型名或地址不对（404）。请检查 LLM_BASE_URL 与 LLM_MODEL。`);
+      }
+      throw new Error(`LLM_HTTP_${res.status}：${text}`);
     }
     const json = (await res.json()) as {
-      choices: { message: { content: string } }[];
+      choices?: { message?: { content?: string; reasoning_content?: string } }[];
       usage?: { prompt_tokens?: number; completion_tokens?: number };
+      error?: { message?: string };
     };
+    if (json.error?.message) throw new Error(`LLM_API_ERROR：${json.error.message}`);
+    // 注意：部分国产模型（含 DeepSeek 的思考模式）会先返回 reasoning_content，
+    // 这里只取最终回答 content，避免把思考过程读给用户。
+    const text = json.choices?.[0]?.message?.content?.trim() ?? '';
     return {
-      text: json.choices[0]?.message?.content?.trim() ?? '',
-      model: config.openaiCompat.model || 'openai-compatible',
+      text,
+      model: config.llm.model || 'openai-compatible',
       live: true,
       usage: { inputTokens: json.usage?.prompt_tokens, outputTokens: json.usage?.completion_tokens },
     };
@@ -232,22 +253,36 @@ const anthropic = new AnthropicProvider();
 const openaiCompat = new OpenAiCompatProvider();
 const mock = new MockLlmProvider();
 
-export const llmProviders: LlmProvider[] = [anthropic, openaiCompat, mock];
+/**
+ * 顺序即优先级：通用兼容通道优先，其次 Claude，最后 Mock 兜底。
+ * 这样你把国产模型的 key 配进 LLM_* 就会立即生效，不会被残留的 Anthropic key 抢走。
+ */
+export const llmProviders: LlmProvider[] = [openaiCompat, anthropic, mock];
 
 export function activeLlmProvider(): LlmProvider {
-  return llmProviders.find((p) => p.meta.configured) ?? mock;
+  return llmProviders.find((p) => isConfigured(p.meta)) ?? mock;
 }
+
+/** 记录最近一次真实调用的失败原因，供「能力接入」面板与日志展示 */
+let lastLlmError: string | null = null;
+export const getLastLlmError = (): string | null => lastLlmError;
 
 /** 调用大模型，失败自动回落到 Mock（保证对话永不中断） */
 export async function completeChat(req: LlmRequest): Promise<LlmResponse> {
   const provider = activeLlmProvider();
-  if (provider.meta.id === 'mock') return provider.complete(req);
+  if (provider.meta.id === 'mock') {
+    // 没走外部通道，就不该留下「上次调用失败」的误导性告警
+    lastLlmError = null;
+    return provider.complete(req);
+  }
   try {
     const res = await provider.complete(req);
-    if (!res.text) throw new Error('empty completion');
+    if (!res.text) throw new Error('LLM_EMPTY_RESPONSE：模型返回了空内容');
+    lastLlmError = null;
     return res;
   } catch (error) {
-    logAdapter('chat 回落 Mock', String(error));
+    lastLlmError = String(error);
+    logAdapter('chat 回落 Mock', lastLlmError);
     return mock.complete(req);
   }
 }

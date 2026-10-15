@@ -2,7 +2,7 @@
  * 外部能力注册表：汇总所有需要「介入 API」的位置，供前端「我的 → 能力接入」展示。
  */
 import type { IntegrationStatus } from '../../../../packages/shared/src/index.ts';
-import { chatIntegrationStatus } from './chat.ts';
+import { chatIntegrationStatus, getLastLlmError } from './chat.ts';
 import { meshIntegrationStatus } from './mesh.ts';
 import { rigIntegrationStatus } from './rigging.ts';
 import { asrIntegrationStatus, ttsIntegrationStatus } from './tts.ts';
@@ -53,6 +53,7 @@ export function integrationReport(): {
   items: IntegrationStatus[];
   mode: 'mock-all' | 'partial' | 'live-all';
   summary: string;
+  lastError: string | null;
 } {
   const groups = [
     chatIntegrationStatus(),
@@ -73,7 +74,7 @@ export function integrationReport(): {
       : mode === 'partial'
         ? `已接入 ${live.length} 个真实通道：${live.map((l) => l.label).join('、')}。其余仍为 Mock。`
         : '真实通道基本齐全，可进行生产环境验证。';
-  return { items, mode, summary };
+  return { items, mode, summary, lastError: getLastLlmError() };
 }
 
 export { toIntegrationStatus };

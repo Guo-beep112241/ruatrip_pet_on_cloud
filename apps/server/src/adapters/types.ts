@@ -29,7 +29,17 @@ export interface ProviderMeta {
   envKeys: string[];
   docsUrl: string;
   note: string;
-  configured: boolean;
+  /**
+   * 是否已配置。
+   * 允许写成 getter，因为 config 是惰性读环境变量的：
+   * 用普通布尔字段会在模块加载时被定格，改完 .env 就不生效了。
+   */
+  configured: boolean | (() => boolean);
+}
+
+/** 统一读法：兼容布尔值与 getter 两种写法 */
+export function isConfigured(meta: ProviderMeta): boolean {
+  return typeof meta.configured === 'function' ? meta.configured() : meta.configured;
 }
 
 export interface ProviderEntry<T> {
@@ -42,7 +52,7 @@ export function toIntegrationStatus(meta: ProviderMeta): IntegrationStatus {
     key: `${meta.capability}:${meta.id}`,
     label: meta.label,
     category: meta.capability,
-    configured: meta.configured,
+    configured: isConfigured(meta),
     provider: meta.id,
     envKeys: meta.envKeys,
     docsUrl: meta.docsUrl,
