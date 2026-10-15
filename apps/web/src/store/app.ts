@@ -20,6 +20,24 @@ import { api, isLoggedIn, setUnauthorizedHandler, withQuery } from '../api/clien
 
 export type Screen = 'onboarding' | 'cabin' | 'hut' | 'travel' | 'checkin' | 'capsule' | 'profile';
 
+/** 情绪关怀提示（审计 F4） */
+export interface CarePrompt {
+  signal: 'prolonged' | 'intense' | 'grief' | null;
+  message: string | null;
+  supportResources: { name: string; contact: string; note: string }[];
+}
+
+/** 应用内通知（审计 F2） */
+export interface NotificationItem {
+  userId: string;
+  title: string;
+  body: string;
+  url?: string;
+  category: 'longing' | 'generation' | 'streak' | 'foster' | 'system';
+  tag?: string;
+  at: string;
+}
+
 export interface Toast {
   id: string;
   text: string;
@@ -58,6 +76,8 @@ interface AppState {
   /** 抚摸/互动的临时反馈（驱动 Q 弹动画与情绪气泡） */
   reaction: { text: string; emoji: string; animation: string; ms: number; key: number } | null;
   atmosphere: number;
+  /** 情绪关怀提示（F4）；由互动响应或摸头响应设置，用户关掉后清空 */
+  care: CarePrompt | null;
 }
 
 interface AppActions {
@@ -86,6 +106,9 @@ interface AppActions {
   pushToast: (text: string, tone?: Toast['tone'], emoji?: string) => void;
   dismissToast: (id: string) => void;
   setReaction: (reaction: { text: string; emoji: string; animation: string; ms: number } | null) => void;
+  dismissCare: () => void;
+  loadNotifications: () => Promise<NotificationItem[]>;
+  checkLonging: () => Promise<void>;
   clearError: () => void;
 }
 
@@ -113,6 +136,7 @@ export const useApp = create<AppState & AppActions>((set, get) => ({
   toasts: [],
   reaction: null,
   atmosphere: 1,
+  care: null,
 
   async bootstrap() {
     set({ loading: true, error: null });
@@ -225,6 +249,8 @@ export const useApp = create<AppState & AppActions>((set, get) => ({
         animationMs: number;
         streakReward: { gain: number; reward: string } | null;
         levelUp: boolean;
+        /** 情绪关怀提示（F4）；null 表示无需提示 */
+        care: CarePrompt | null;
       }>('/interact', { petId: pet.id, action, ...(toyId ? { toyId } : {}) });
       set({
         pet: data.pet,
@@ -245,6 +271,8 @@ export const useApp = create<AppState & AppActions>((set, get) => ({
       if (data.streakReward) {
         get().pushToast(`连续陪伴奖励：${data.streakReward.reward}`, 'warm', '🔥');
       }
+      // 情绪关怀（F4）：用宠物的口吻呈现，不弹窗、不阻断操作
+      if (data.care) set({ care: data.care });
     } catch (error) {
       get().pushToast(error instanceof Error ? error.message : '互动失败', 'warning', '😿');
     }
@@ -254,10 +282,14 @@ export const useApp = create<AppState & AppActions>((set, get) => ({
     const pet = get().pet;
     if (!pet) return;
     try {
-      const data = await api.post<{ pet: Pet; reaction: string; animation: string; animationMs: number }>(
-        '/interact/pet',
-        { petId: pet.id, part, gesture },
-      );
+      const data = await api.post<{
+        pet: Pet;
+        reaction: string;
+        animation: string;
+        animationMs: number;
+        care: CarePrompt | null;
+      }>('/interact/pet', { petId: pet.id, part, gesture });
+      if (data.care) set({ care: data.care });
       set({
         pet: data.pet,
         reaction: {
@@ -433,6 +465,22 @@ export const useApp = create<AppState & AppActions>((set, get) => ({
   },
   setReaction(reaction) {
     set({ reaction: reaction ? { ...reaction, key: Date.now() } : null });
+  },
+  dismissCare() {
+    set({ care: null });
+  },
+  async loadNotifications() {
+    const data = await api.get<{ items: NotificationItem[]; channel: string; note: string }>(
+      '/notifications',
+    );
+    return data.items;
+  },
+  async checkLonging() {
+    try {
+      await api.post('/notifications/longing-check');
+    } catch {
+      /* 召回检查失败不影响主流程 */
+    }
   },
   clearError() {
     set({ error: null });

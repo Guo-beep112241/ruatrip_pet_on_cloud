@@ -35,6 +35,8 @@ export interface TodayUsage {
   totalGain: number;
   remainingCap: number;
   byAction: Record<string, { used: number; limit: number; remaining: number }>;
+  /** 今日互动总条数：用于「高强度使用」判断（审计 F4），不能用单个动作的次数 */
+  totalInteractions: number;
 }
 
 /** 统计当日已用次数与好感度（防刷基础数据） */
@@ -54,7 +56,12 @@ export function todayUsage(repos: Repositories, petId: string): TodayUsage {
     };
   }
   // 陪玩按「每种玩具单独计数」，这里的 used/remaining 是该动作的当日总量口径
-  return { totalGain, remainingCap: Math.max(0, DAILY_AFFECTION_CAP - totalGain), byAction };
+  return {
+    totalGain,
+    remainingCap: Math.max(0, DAILY_AFFECTION_CAP - totalGain),
+    byAction,
+    totalInteractions: logs.length,
+  };
 }
 
 /** 检查某个动作当前是否还能加好感度 */

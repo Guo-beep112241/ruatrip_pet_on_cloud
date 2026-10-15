@@ -47,6 +47,9 @@ import { hasObjectStorage } from './config.ts';
 import { buildKey, createStorage, decodeImage, validateImageRef } from './storage/index.ts';
 import { integrationReport } from './adapters/registry.ts';
 import { activeLlmProvider } from './adapters/chat.ts';
+import { Analytics, RemoteAnalyticsSink } from './adapters/analytics.ts';
+import { PushService, WebPushProvider, generationDonePushText, longingPushText } from './adapters/push.ts';
+import { CareTracker, SUPPORT_RESOURCES } from './services/care.ts';
 import {
   DESTINATIONS,
   PREFERENCE_QUESTIONS,
@@ -100,6 +103,40 @@ const persistenceChoice = createPersistenceDriver({
 
 const store = getStore(config.dataDir, { driver: persistenceChoice.driver });
 const repos = new Repositories(store);
+
+/**
+ * 埋点（审计 F3）：本地始终记录，配了 ANALYTICS_* 则额外上报。
+ * 只采集行为计数与时序，不采集对话内容与照片（见 adapters/analytics.ts 的白名单）。
+ */
+const analytics = new Analytics(
+  config.analytics.endpoint && config.analytics.writeKey
+    ? new RemoteAnalyticsSink(config.analytics.endpoint, config.analytics.writeKey)
+    : null,
+);
+
+/**
+ * 推送（审计 F2）：未配真实通道时用本地实现（应用内通知列表），
+ * 不会假装投递成功。
+ */
+const push = new PushService(
+  config.push.endpoint && config.push.publicKey && config.push.privateKey
+    ? new WebPushProvider({
+        publicKey: config.push.publicKey,
+        privateKey: config.push.privateKey,
+        sendEndpoint: config.push.endpoint,
+      })
+    : undefined,
+);
+
+/** 情绪关怀（审计 F4）：会话级信号，不落库 */
+const care = new CareTracker();
+
+/**
+ * 抚摸计数（按宠物）。
+ * 抚摸不加好感度也没有日志，但「一直点」是最典型的高强度使用信号，
+ * 所以单独计数用于关怀判断。
+ */
+const touchCounters = new Map<string, number>();
 
 /** 对象存储：四个 S3 变量齐全就用 S3，否则本地磁盘（审计 B3） */
 const storage = createStorage({
@@ -824,6 +861,11 @@ router.post('/api/pet', (ctx) => {
     userId: user.id,
     tier: user.tier,
   });
+  analytics.track('pet.create', auth.userId, {
+    petIndex: repos.listPetsByOwner(auth.userId).length,
+    slots: slot.limit,
+  });
+
   return { ok: true, data: { pet, job } };
 });
 
@@ -864,7 +906,110 @@ router.get('/api/pet/generation/:jobId', (ctx) => {
   // 归属校验：jobId 是全局唯一的，不校验就能看到别人的生成进度
   assertPetOwned(repos, auth.userId, job.petId);
   const pet = requirePet(job.petId, auth.userId);
+
+  /**
+   * 生成完成时发一次通知（F2）。
+   * 用 meta 标记「已通知」避免前端多次轮询导致重复推送。
+   */
+  const done = job.stage === 'ready' || job.stage === 'fallback_used';
+  const notifiedKey = `pushed:gen:${job.id}`;
+  if (done && !repos.getMeta<boolean>(notifiedKey, false)) {
+    repos.setMeta(notifiedKey, true);
+    const degraded = job.stage === 'fallback_used';
+    const text = generationDonePushText(pet.name, degraded);
+    void push.send({
+      userId: auth.userId,
+      title: text.title,
+      body: text.body,
+      url: '/cabin',
+      category: 'generation',
+      tag: `gen-${job.id}`,
+    });
+    analytics.track(degraded ? 'pet.generation_fallback' : 'pet.generation_ready', auth.userId, {
+      provider: job.provider,
+      degraded,
+    });
+  }
+
   return { ok: true, data: { job, pet, incubatingLines: INCUBATING_LINES } };
+});
+
+/**
+ * 通知列表（F2）。
+ *
+ * 未接真实推送通道时，这里就是用户唯一能看到提醒的地方，
+ * 所以它不是「占位接口」而是本地通道的正经出口。
+ */
+router.get('/api/notifications', (ctx) => {
+  const auth = authOf(ctx.req);
+  return {
+    ok: true,
+    data: {
+      items: push.local.list(auth.userId, 20),
+      channel: push.activeChannel,
+      realChannelConfigured: push.realChannelConfigured,
+      note: push.realChannelConfigured
+        ? '已接入真实推送通道'
+        : '当前为应用内通知（未接入 APNs/FCM/Web Push）。用户离开应用后收不到提醒，见 docs/API-INTEGRATION.md 第 9 节。',
+    },
+  };
+});
+
+/**
+ * 主动检查是否需要召回提醒（F2 + 3.1-2）。
+ *
+ * 由前端在打开应用时调用一次：如果想念值低到该提醒，就发一条通知。
+ * 设计成「打开时检查」而不是「定时推送」，是为了在未接推送通道时也能工作。
+ */
+router.post('/api/notifications/longing-check', async (ctx) => {
+  const auth = authOf(ctx.req);
+  const pet = activePet(undefined, auth.userId);
+  if (!pet) return { ok: true, data: { sent: false, reason: 'no-pet' } };
+
+  const hourKey = `pushed:longing:${pet.id}:${new Date().toISOString().slice(0, 13)}`;
+  if (repos.getMeta<boolean>(hourKey, false)) {
+    return { ok: true, data: { sent: false, reason: 'already-sent-this-hour' } };
+  }
+  if (pet.longing >= 60) {
+    return { ok: true, data: { sent: false, reason: 'longing-ok', longing: pet.longing } };
+  }
+
+  repos.setMeta(hourKey, true);
+  const text = longingPushText(pet.name, pet.longing);
+  const result = await push.send({
+    userId: auth.userId,
+    title: text.title,
+    body: text.body,
+    url: '/cabin',
+    category: 'longing',
+    tag: `longing-${pet.id}`,
+  });
+  analytics.track('care.rest_prompt', auth.userId, { longing: pet.longing });
+  return { ok: true, data: { sent: result.delivered, longing: pet.longing, channel: result.channel } };
+});
+
+/**
+ * 埋点汇总（F3）。仅供部署者自查与调参，需要登录。
+ * 这正是说明书 2.5 风险 3 要的「用数据验证好感度曲线」的最小闭环。
+ */
+router.get('/api/analytics/summary', (ctx) => {
+  authOf(ctx.req);
+  return {
+    ok: true,
+    data: {
+      ...analytics.local.summary(),
+      realSinkConfigured: analytics.realSinkConfigured,
+      privacyNote:
+        '只统计行为事件计数与时序，不包含对话内容、照片、宠物名或邮箱。' +
+        'PROPS 键受白名单限制（见 adapters/analytics.ts）。',
+    },
+  };
+});
+
+/** 导出埋点原始事件，便于本地分析或迁到真实分析服务 */
+router.get('/api/analytics/export', (ctx) => {
+  authOf(ctx.req);
+  return { ok: true, data: analytics.local.export() };
 });
 
 router.get('/api/pet/mood', (ctx) => {
@@ -909,6 +1054,36 @@ router.post('/api/interact', (ctx) => {
   const reaction = reactionFor(action, applied.pet);
   const usage = todayUsage(repos, applied.pet.id);
 
+  // 埋点（F3）：只记行为与时序，不记内容
+  analytics.track(`interact.${action}` as never, auth.userId, {
+    gain: applied.gain,
+    capped: applied.cappedGain,
+    level: applied.pet.level,
+    affection: applied.pet.affection,
+  });
+  if (applied.cappedGain > 0) {
+    analytics.track('affection.capped', auth.userId, { capped: applied.cappedGain });
+  }
+  if (applied.levelUp) {
+    analytics.track('affection.levelup', auth.userId, { level: applied.pet.level });
+  }
+  if (streak.reward) {
+    analytics.track('streak.milestone', auth.userId, { count: streak.streakDays ?? 0 });
+  }
+
+  /**
+   * 情绪关怀（F4）：每次互动都是观察点。
+   *
+   * actionCount 必须是「今日总活动量」而不是「单个动作的次数」——
+   * 用后者的话，即便用户连点 200 次摸头也永远到不了阈值
+   * （每次只 +1 到各自的计数器）。这里取今日全部互动日志的条数。
+   */
+  const careDecision = care.observe({
+    userId: auth.userId,
+    actionCount: usage.totalInteractions,
+    griefMentions: repos.getMeta<number>(`grief:${auth.userId}`, 0),
+  });
+
   return {
     ok: true,
     data: {
@@ -923,6 +1098,14 @@ router.post('/api/interact', (ctx) => {
       levelUp: applied.levelUp,
       streakReward: streak.reward,
       log: applied.log,
+      /** 情绪关怀提示（F4）；不需要时是 null，前端不显示任何东西 */
+      care: careDecision.shouldPrompt
+        ? {
+            signal: careDecision.signal,
+            message: careDecision.message,
+            supportResources: careDecision.showSupportResources ? SUPPORT_RESOURCES : [],
+          }
+        : null,
     },
   };
 });
@@ -941,9 +1124,34 @@ router.post('/api/interact/pet', (ctx) => {
   const pool = INSTANT_POOL[key] ?? INSTANT_POOL['pet.head']!;
   const line = pool[Math.floor(Math.random() * pool.length)]!;
   const animation = body.gesture === 'double' ? 'mood-shy' : body.gesture === 'long' ? 'reunion-hug' : 'talk-tilt';
+
+  /**
+   * 抚摸是最容易被连点的入口，所以它也要计入关怀观察（F4）。
+   * 抚摸本身不加好感度，但「一直点」正是高强度使用的信号。
+   */
+  touchCounters.set(body.petId!, (touchCounters.get(body.petId!) ?? 0) + 1);
+  const careDecision = care.observe({
+    userId: auth.userId,
+    actionCount: touchCounters.get(body.petId!) ?? 0,
+    griefMentions: repos.getMeta<number>(`grief:${auth.userId}`, 0),
+  });
+
   return {
     ok: true,
-    data: { pet, reaction: line, animation, animationMs: body.gesture === 'long' ? 1600 : 900, affectionDelta: 0 },
+    data: {
+      pet,
+      reaction: line,
+      animation,
+      animationMs: body.gesture === 'long' ? 1600 : 900,
+      affectionDelta: 0,
+      care: careDecision.shouldPrompt
+        ? {
+            signal: careDecision.signal,
+            message: careDecision.message,
+            supportResources: careDecision.showSupportResources ? SUPPORT_RESOURCES : [],
+          }
+        : null,
+    },
   };
 });
 
@@ -1012,10 +1220,36 @@ router.post('/api/chat', async (ctx) => {
   if (body.conversationId) assertConversationOwned(repos, auth.userId, body.conversationId);
   const result = await sendMessage(repos, pet, {
     ...(body.conversationId ? { conversationId: body.conversationId } : {}),
-    text: (body.text ?? '').slice(0, 500),
+    // 长度已由 SCHEMAS.chat 校验（<=500），这里不再截断
+    text: body.text,
     layer: (body.layer as never) ?? 'auto',
     viaVoice: Boolean(body.viaVoice),
   });
+
+  // 埋点（F3）：记录分层与是否走了模型，用于验证「对话分层省成本」这个设计
+  analytics.track(result.modelUsed ? 'chat.model_used' : 'chat.free_layer', auth.userId, {
+    layer: result.petMessage.layer,
+    modelUsed: result.modelUsed,
+    degraded: result.degraded,
+    gain: result.affectionGain,
+  });
+  if (result.safety.blocked) {
+    analytics.track('chat.safety_blocked', auth.userId, { category: result.safety.category ?? 'unknown' });
+
+    /**
+     * 悲伤信号（F4）：连续提及离世/告别类话题时累计。
+     * 只存计数，不存内容 —— 这样即使数据库泄漏也不会暴露用户说了什么。
+     */
+    if (result.safety.category === 'self-harm') {
+      const key = `grief:${auth.userId}`;
+      const next = repos.getMeta<number>(key, 0) + 1;
+      repos.setMeta(key, next);
+      if (next >= 3) {
+        analytics.track('care.support_resources', auth.userId, { count: next });
+      }
+    }
+  }
+
   return { ok: true, data: result };
 });
 
@@ -1068,6 +1302,7 @@ router.post('/api/travel/checkin', async (ctx) => {
   const pet = requirePet(body.petId, auth.userId);
   enforceDailyQuota('checkin', pet.ownerId);
   if (!destinationById(body.destinationId ?? '')) throw Object.assign(new Error('DESTINATION_NOT_FOUND'), { status: 404 });
+  const wasRevisit = repos.listCheckins(pet.id).some((c) => c.destinationId === body.destinationId);
   const outcome = await performCheckin(repos, pet, {
     destinationId: body.destinationId!,
     photoUrl: requireValidImageRef(body.photoUrl, 'photoUrl') || null,
@@ -1075,6 +1310,17 @@ router.post('/api/travel/checkin', async (ctx) => {
     ...(body.lng !== undefined ? { lng: body.lng } : {}),
     ...(body.note ? { note: body.note } : {}),
   });
+  analytics.track('travel.checkin', auth.userId, {
+    destinationId: body.destinationId,
+    gain: outcome.gain,
+    isRevisit: wasRevisit,
+    cityCount: new Set(repos.listCheckins(outcome.pet.id).map((c) => c.destinationId)).size,
+  });
+  if (wasRevisit) analytics.track('travel.revisit', auth.userId, { destinationId: body.destinationId });
+  analytics.track('journal.generate', auth.userId, { template: outcome.journal.template });
+  analytics.track('postcard.generate', auth.userId, { template: outcome.postcard.template });
+  if (outcome.blindBox) analytics.track('wishlist.unlock', auth.userId, { itemId: outcome.blindBox.name });
+
   return { ok: true, data: outcome };
 });
 

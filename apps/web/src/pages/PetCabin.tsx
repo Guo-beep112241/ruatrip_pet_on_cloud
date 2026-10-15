@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Sparkles, Flame, Footprints, Droplets } from 'lucide-react';
 import { AppShell, LevelHint } from '../components/AppShell';
 import { PetStage } from '../components/PetStage';
-import { InteractionDock, MoodBubble, SideDock } from '../components/InteractionDock';
+import { CareNotice, InteractionDock, MoodBubble, SideDock } from '../components/InteractionDock';
 import { Card, Chip, EmptyState, ProgressBar } from '../components/ui';
 import { useApp } from '../store/app';
 import { goTo } from '../hooks/useHashRouter';
@@ -98,6 +98,8 @@ export function PetCabin() {
           </div>
 
           <MoodBubble />
+          {/* 情绪关怀（F4）：只在需要时出现，不打断操作 */}
+          <CareNotice />
         </div>
 
         {/* 右：操作与状态 */}

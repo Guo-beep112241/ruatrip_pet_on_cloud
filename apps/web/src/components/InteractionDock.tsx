@@ -36,6 +36,49 @@ export function MoodBubble() {
   );
 }
 
+/**
+ * 情绪关怀提示（审计 F4）。
+ *
+ * 呈现原则：不弹窗、不阻断操作、用宠物的口吻说。
+ * 只有 grief 信号才附现实支持渠道 —— 平时把热线号码塞给用户是打扰。
+ */
+export function CareNotice() {
+  const care = useApp((s) => s.care);
+  const dismiss = useApp((s) => s.dismissCare);
+  if (!care?.message) return null;
+
+  return (
+    <div className="animate-drop-in rounded-card border border-border-subtle/50 bg-surface-raised/90 p-base shadow-plush">
+      <div className="flex items-start gap-snug">
+        <span className="text-lg leading-none" aria-hidden>
+          🐾
+        </span>
+        <p className="flex-1 text-body-sm leading-relaxed text-text-secondary">{care.message}</p>
+        <button
+          type="button"
+          onClick={dismiss}
+          className="-mr-1 -mt-0.5 rounded-pill px-snug py-0.5 text-caption text-text-muted transition-colors hover:bg-surface-sunken"
+          aria-label="知道了"
+        >
+          知道了
+        </button>
+      </div>
+
+      {care.supportResources.length ? (
+        <div className="mt-snug space-y-1 border-t border-border-subtle/40 pt-snug">
+          <p className="text-caption text-text-muted">如果需要，这些人随时可以接住你：</p>
+          {care.supportResources.map((r) => (
+            <p key={r.contact} className="text-caption text-text-secondary">
+              {r.name} <span className="font-medium text-text-primary">{r.contact}</span>
+              <span className="ml-1 text-text-muted">（{r.note}）</span>
+            </p>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** 互动操作区：喂饭 / 洗澡 / 陪玩 / 真心话（说明书 6.3-2） */
 export function InteractionDock() {
   const pet = useApp((s) => s.pet);

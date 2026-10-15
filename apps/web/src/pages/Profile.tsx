@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import { Baby, Check, Copy, KeyRound, Sparkles, Users } from 'lucide-react';
 import { AppShell } from '../components/AppShell';
 import { Button, Card, Chip, SectionTitle, Sheet } from '../components/ui';
+import { capabilityNotes, detectCapabilities } from '../hooks/useMediaQuery';
 import { useApp } from '../store/app';
 import { api, auth, withQuery } from '../api/client';
 import { SUBSCRIPTION_PLANS } from '../api/types';
@@ -382,6 +383,15 @@ export function Profile() {
             ))}
           </div>
         </Card>
+
+        {/* 运行环境与提醒（F2 / F9） */}
+        <Card>
+          <SectionTitle
+            title="运行环境与提醒"
+            hint="微信内置浏览器会限制部分能力，这里列出实际可用的与对应的降级方式。"
+          />
+          <CapabilityPanel />
+        </Card>
       </div>
 
       {/* 能力接入面板：明确指出「需要介入 API 的地方」 */}
@@ -592,6 +602,50 @@ function AccountPanel({ onDone }: { onDone: () => void }) {
             确认注销并删除全部数据
           </Button>
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * 运行环境自查（审计 F9）。
+ *
+ * 微信内置浏览器会静默屏蔽若干能力（语音识别、系统推送），
+ * 与其让用户以为是「坏了」，不如明确列出哪些会降级、降级成什么。
+ */
+function CapabilityPanel() {
+  const [caps] = useState(() => detectCapabilities());
+  const notes = capabilityNotes(caps);
+
+  return (
+    <div className="space-y-snug">
+      {caps.isWeChat ? (
+        <p className="rounded-tight bg-surface-sunken/70 p-snug text-caption text-text-secondary">
+          你正在微信内置浏览器里打开。部分能力受微信限制，下面标出了降级方式；
+          想完整体验可以点右上角「在浏览器打开」。
+        </p>
+      ) : null}
+      <ul className="space-y-1.5">
+        {notes.map((n) => (
+          <li key={n.feature} className="flex items-start justify-between gap-snug text-caption">
+            <span className="text-text-secondary">{n.feature}</span>
+            <span className="flex-1 text-right">
+              <span className={clsx(
+                'mr-snug rounded-pill px-1.5 py-0.5',
+                n.status === '可用' ? 'bg-state-success/15 text-state-success' : 'bg-state-warning/18 text-state-warning',
+              )}>
+                {n.status}
+              </span>
+              <span className="text-text-muted">{n.fallback}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      {!caps.secureContext ? (
+        <p className="rounded-tight bg-state-warning/15 p-snug text-caption text-text-secondary">
+          当前不是 HTTPS。定位、麦克风、摄像头在非安全上下文中会被浏览器禁用 ——
+          上线请务必配置 HTTPS（见 docs/DEPLOYMENT.md）。
+        </p>
       ) : null}
     </div>
   );

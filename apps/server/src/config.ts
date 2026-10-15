@@ -234,6 +234,33 @@ export const config = {
   },
 
   /**
+   * 推送（审计 F2）。三个都配上才算接入真实通道。
+   */
+  push: {
+    get endpoint() {
+      return str('PUSH_ENDPOINT');
+    },
+    get publicKey() {
+      return str('PUSH_VAPID_PUBLIC_KEY');
+    },
+    get privateKey() {
+      return str('PUSH_VAPID_PRIVATE_KEY');
+    },
+  },
+
+  /**
+   * 行为埋点（审计 F3）。只上报行为计数，不含对话内容与照片。
+   */
+  analytics: {
+    get endpoint() {
+      return str('ANALYTICS_ENDPOINT');
+    },
+    get writeKey() {
+      return str('ANALYTICS_WRITE_KEY');
+    },
+  },
+
+  /**
    * 支付（审计 F6 / 十一）。
    *
    * 配置了 PROVIDER_KEY 才算「已接入支付」；未接入时订阅走模拟开通，
