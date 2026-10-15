@@ -394,10 +394,11 @@ function MapCanvas({
   onSelect: (d: Destination) => void;
   userPoint: { lat: number; lng: number } | null;
 }) {
+  // 等距圆柱投影；留出内边距，避免最右侧/最上方的城市名被卡片裁掉
   const project = (lat: number, lng: number) => {
     const x = ((lng - 70) / (145 - 70)) * 100;
     const y = ((55 - lat) / (55 - 5)) * 100;
-    return { x: Math.max(4, Math.min(96, x)), y: Math.max(6, Math.min(94, y)) };
+    return { x: Math.max(8, Math.min(90, x)), y: Math.max(8, Math.min(92, y)) };
   };
 
   return (
