@@ -22,7 +22,11 @@ import type {
 import type { Store } from '../db/store.ts';
 
 export class Repositories {
-  constructor(private readonly store: Store) {}
+  private readonly store: Store;
+
+  constructor(store: Store) {
+    this.store = store;
+  }
 
   /* ---------------- user ---------------- */
   getUser(): UserProfile | null {

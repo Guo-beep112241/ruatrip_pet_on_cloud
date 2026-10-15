@@ -12,6 +12,8 @@ import { getStore } from './db/store.ts';
 import { Repositories } from './repositories/index.ts';
 import { readJsonBody, Router, sendError, sendJson, type Ctx } from './http/router.ts';
 import { serveStatic, webDistAvailable } from './http/static.ts';
+import { API_CSP, applyBaseHeaders, applyCors, contentSecurityPolicy } from './http/security.ts';
+import { DEFAULT_DAILY_LIMITS, clientKey, dailyQuota, rateLimitStore, ruleFor } from './http/rateLimit.ts';
 import { integrationReport } from './adapters/registry.ts';
 import {
   DESTINATIONS,
@@ -46,7 +48,7 @@ import {
   storyProgress,
 } from './services/travel.ts';
 import { generateJournal, generatePostcard } from './services/content.ts';
-import { renderPetSvg } from './services/petArt.ts';
+import { renderPetSvg, safePalette, safeSpecies } from './services/petArt.ts';
 import { activeTtsProvider, VOICE_PRESETS } from './services/adapters-bridge.ts';
 
 const store = getStore(config.dataDir);
@@ -80,6 +82,23 @@ function activePet(petId?: string | null): Pet | null {
   return refreshPetState(repos, pet);
 }
 
+
+/**
+ * 每日成本硬闸门（审计 S5）。
+ *
+ * 速率限流防「瞬间打爆」，这里防「一整天慢慢刷」。
+ * 超限时抛出 429，前端会看到明确提示而不是静默变慢。
+ */
+function enforceDailyQuota(kind: keyof typeof DEFAULT_DAILY_LIMITS, userId: string): void {
+  const verdict = dailyQuota.consume(userId, kind);
+  if (!verdict.allowed) {
+    throw Object.assign(new Error('DAILY_QUOTA_EXCEEDED'), {
+      status: 429,
+      quota: { kind, used: verdict.used, limit: verdict.limit },
+    });
+  }
+}
+
 function requirePet(petId?: string | null): Pet {
   const pet = activePet(petId);
   if (!pet) {
@@ -93,6 +112,24 @@ function requirePet(petId?: string | null): Pet {
 /* ------------------------------------------------------------------ */
 /* 路由表                                                              */
 /* ------------------------------------------------------------------ */
+/**
+ * 会调用「按次计费」外部能力的接口，单独限流（审计 S5）。
+ *
+ * 这些接口每被调用一次就产生真实成本：
+ *   /api/chat            → 大模型对话
+ *   /api/pet             → 3D 生成（一次几元量级）
+ *   /api/travel/checkin  → 图像合成
+ *   /api/tts             → 语音合成
+ *   /api/capsule         → 图生 3D（成本最高）
+ */
+const EXPENSIVE_ROUTES: Record<string, string> = {
+  'POST /api/chat': 'api:chat',
+  'POST /api/pet': 'api:pet:create',
+  'POST /api/travel/checkin': 'api:checkin',
+  'POST /api/tts': 'api:tts',
+  'POST /api/capsule': 'api:capsule',
+};
+
 const router = new Router();
 
 /* -------- 引导与基础数据 -------- */
@@ -138,13 +175,25 @@ router.get('/api/catalog', () => ({
   },
 }));
 
-/** 本地降级宠物形象：Mock 模式下的形象母版，也是低端机降级通道 */
+/**
+ * 本地降级宠物形象：Mock 模式下的形象母版，也是低端机降级通道。
+ *
+ * 安全：species / palette 一律走白名单（safeSpecies / safePalette），
+ * name 在渲染函数内部转义并截断长度。响应额外加 CSP，即使有人找到
+ * 绕过路径也没法执行脚本。
+ */
 router.get('/api/asset/pet.svg', (ctx) => {
-  const species = ctx.query.get('species') ?? 'ragdoll';
-  const palette = (ctx.query.get('palette') ?? 'oat,chestnut').split(',').filter(Boolean);
+  const species = safeSpecies(ctx.query.get('species'));
+  const palette = safePalette((ctx.query.get('palette') ?? '').split(',').filter(Boolean));
   const name = ctx.query.get('name') ?? '宠物';
   const svg = renderPetSvg({ species, palette, name });
-  ctx.res.writeHead(200, { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=86400' });
+  ctx.res.writeHead(200, {
+    'content-type': 'image/svg+xml; charset=utf-8',
+    'cache-control': 'public, max-age=86400',
+    // SVG 是唯一能「承载脚本的图片格式」，所以单独给它上锁
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+    'x-content-type-options': 'nosniff',
+  });
   ctx.res.end(svg);
   return null;
 });
@@ -187,6 +236,7 @@ router.post('/api/survey', (ctx) => {
 /* -------- 宠物生成与展示 -------- */
 router.post('/api/pet', (ctx) => {
   const user = currentUser();
+  enforceDailyQuota('petCreate', user.id);
   const body = (ctx.body ?? {}) as { answers?: Record<string, string[]>; name?: string; callName?: string };
   const answers = body.answers ?? repos.getAnswers() ?? {};
   const { pet, job } = createPetFromAnswers(repos, {
@@ -366,6 +416,7 @@ router.post('/api/chat', async (ctx) => {
     petId?: string; conversationId?: string; text?: string; layer?: string; viaVoice?: boolean;
   };
   const pet = requirePet(body.petId);
+  enforceDailyQuota('chat', pet.ownerId);
   const result = await sendMessage(repos, pet, {
     ...(body.conversationId ? { conversationId: body.conversationId } : {}),
     text: (body.text ?? '').slice(0, 500),
@@ -387,6 +438,7 @@ router.get('/api/chat/memories', (ctx) => {
 router.post('/api/tts', async (ctx) => {
   const body = (ctx.body ?? {}) as { petId?: string; text?: string };
   const pet = requirePet(body.petId);
+  enforceDailyQuota('tts', pet.ownerId);
   const provider = activeTtsProvider();
   const result = await provider.synthesize({
     text: (body.text ?? '').slice(0, 300),
@@ -419,6 +471,7 @@ router.post('/api/travel/checkin', async (ctx) => {
     petId?: string; destinationId?: string; photoUrl?: string | null; lat?: number; lng?: number; note?: string;
   };
   const pet = requirePet(body.petId);
+  enforceDailyQuota('checkin', pet.ownerId);
   if (!destinationById(body.destinationId ?? '')) throw Object.assign(new Error('DESTINATION_NOT_FOUND'), { status: 404 });
   const outcome = await performCheckin(repos, pet, {
     destinationId: body.destinationId!,
@@ -485,6 +538,7 @@ router.get('/api/capsule', () => {
 
 router.post('/api/capsule', (ctx) => {
   const user = currentUser();
+  enforceDailyQuota('capsule', user.id);
   const body = (ctx.body ?? {}) as { photoUrl?: string; petName?: string; letterTo?: string };
   const project = {
     id: `cap-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -621,21 +675,11 @@ router.post('/api/subscribe', (ctx) => {
 /* 服务器                                                              */
 /* ------------------------------------------------------------------ */
 const server = createServer(async (req, res) => {
-  const origin = req.headers.origin;
-  if (origin && (config.corsOrigins.includes(origin) || config.corsOrigins.includes('*'))) {
-    res.setHeader('access-control-allow-origin', origin);
-    res.setHeader('access-control-allow-credentials', 'true');
-  } else {
-    res.setHeader('access-control-allow-origin', '*');
-  }
-  res.setHeader('access-control-allow-methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
-  res.setHeader('access-control-allow-headers', 'content-type,authorization');
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
+  // 安全响应头：所有响应都带（审计 S4）
+  applyBaseHeaders(res);
+  // 严格 CORS：不匹配白名单就不设 ACAO（审计 S2）
+  const cors = applyCors(res, req.headers.origin, config.corsOrigins, req.method);
+  if (cors.preflightHandled) return;
 
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   const matched = router.match(req.method ?? 'GET', url.pathname);
@@ -643,11 +687,34 @@ const server = createServer(async (req, res) => {
   if (!matched) {
     // 非 /api 的 GET/HEAD 请求交给前端静态资源（生产环境同源部署）
     if ((req.method === 'GET' || req.method === 'HEAD') && !url.pathname.startsWith('/api')) {
+      // 前端页面单独一套 CSP：需要允许 data: 图片、字体 CDN、以及与后端通信
+      res.setHeader('content-security-policy', contentSecurityPolicy(config.corsOrigins.filter((o) => o !== '*')));
       if (serveStatic(req, res, url.pathname)) return;
     }
     sendError(res, 404, 'NOT_FOUND', `未找到路由 ${req.method} ${url.pathname}`);
     return;
   }
+
+  // ---- 限流（审计 S5）----
+  // 分桶优先用路由声明的，其次查「昂贵接口」集中表，最后按读写自动归类。
+  // 集中表的好处：不必为了传参数去改每个路由的签名，新增昂贵接口只要加一行。
+  const bucket =
+    matched.bucket ??
+    EXPENSIVE_ROUTES[`${req.method} ${url.pathname}`] ??
+    (req.method === 'GET' ? 'api:read' : 'api:write');
+  const rule = ruleFor(bucket);
+  const limiterKey = `${bucket}|${clientKey(req)}`;
+  const verdict = rateLimitStore.hit(limiterKey, rule, Date.now());
+  if (!verdict.allowed) {
+    const retryAfterSec = Math.ceil(verdict.retryAfterMs / 1000);
+    res.setHeader('retry-after', String(retryAfterSec));
+    res.setHeader('x-ratelimit-limit', String(verdict.limit));
+    res.setHeader('x-ratelimit-remaining', '0');
+    sendError(res, 429, 'RATE_LIMITED', `请求太频繁了，请 ${retryAfterSec} 秒后再试。`);
+    return;
+  }
+  res.setHeader('x-ratelimit-limit', String(verdict.limit));
+  res.setHeader('x-ratelimit-remaining', String(verdict.remaining));
 
   try {
     let body: unknown = null;
@@ -663,7 +730,11 @@ const server = createServer(async (req, res) => {
       body,
     };
     const result = await matched.handler(ctx);
-    if (result !== null && !res.writableEnded) sendJson(res, 200, result);
+    if (result !== null && !res.writableEnded) {
+      // API 响应不需要任何外部来源
+      if (!res.hasHeader('content-security-policy')) res.setHeader('content-security-policy', API_CSP);
+      sendJson(res, 200, result);
+    }
   } catch (error) {
     const err = error as Error & { status?: number; message: string };
     const status = err.status ?? 500;
@@ -684,6 +755,8 @@ function humanizeError(code: string): string {
     PAYLOAD_TOO_LARGE: '上传内容太大了。',
     INVALID_JSON: '请求体不是合法 JSON。',
     CAPSULE_NOT_FOUND: '没有这个时光胶囊项目。',
+    DAILY_QUOTA_EXCEEDED: '今天的额度用完了，明天再来吧。这是为了保护服务不被人刷爆。',
+    RATE_LIMITED: '请求太频繁了，歇一会儿再试。',
     JOB_NOT_FOUND: '没有这个生成任务。',
   };
   return map[code] ?? code;

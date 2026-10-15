@@ -71,7 +71,10 @@ export class Store {
   private readonly file: string;
   private dirty = false;
 
-  constructor(private readonly dir: string) {
+  private readonly dir: string;
+
+  constructor(dir: string) {
+    this.dir = dir;
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     this.file = join(dir, 'ruatrip.json');
     this.load();

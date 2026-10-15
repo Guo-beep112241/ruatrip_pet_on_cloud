@@ -33,10 +33,32 @@ const SPECIES_SHAPE: Record<string, { ears: 'long' | 'round' | 'pointy' | 'small
   chimera: { ears: 'round', tail: 'curl', snout: 'medium', extra: 'sparkle' },
 };
 
+/**
+ * 严格白名单：只接受已知的物种与调色板 key。
+ * 只要有一个字符不在白名单里，就整段回落到默认值——
+ * 绝不把用户输入拼进 SVG（历史缺陷：species 参数可注入 <script>）。
+ */
+export function safeSpecies(input: string | null | undefined): string {
+  return typeof input === 'string' && Object.hasOwn(SPECIES_SHAPE, input) ? input : 'ragdoll';
+}
+
+export function safePalette(input: readonly string[] | null | undefined): string[] {
+  const picked = (input ?? []).filter((k) => typeof k === 'string' && Object.hasOwn(PALETTE, k));
+  const filled = [...picked];
+  for (const fallback of ['oat', 'chestnut']) {
+    if (filled.length >= 2) break;
+    if (!filled.includes(fallback)) filled.push(fallback);
+  }
+  return filled.slice(0, 3);
+}
+
 export function renderPetSvg(opts: { species: string; palette: string[]; name: string }): string {
-  const shape = SPECIES_SHAPE[opts.species] ?? SPECIES_SHAPE.ragdoll!;
-  const c1 = PALETTE[opts.palette[0] ?? 'oat'] ?? PALETTE.oat!;
-  const c2 = PALETTE[opts.palette[1] ?? 'chestnut'] ?? PALETTE.chestnut!;
+  // 出口处再兜一次，防止有人绕过路由直接调用本函数
+  const species = safeSpecies(opts.species);
+  const palette = safePalette(opts.palette);
+  const shape = SPECIES_SHAPE[species]!;
+  const c1 = PALETTE[palette[0] ?? 'oat']!;
+  const c2 = PALETTE[palette[1] ?? 'chestnut']!;
 
   const ears = () => {
     switch (shape.ears) {
@@ -101,7 +123,8 @@ export function renderPetSvg(opts: { species: string; palette: string[]; name: s
     : `<ellipse cx="170" cy="198" rx="24" ry="16" fill="${c1.accent}" stroke="${c1.dark}" stroke-width="3"/>
        <path d="M170 192 l-8 8 h16 z" fill="${c1.eye}"/>`;
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 360" width="340" height="360" role="img" aria-label="${escapeXml(opts.name)}">
+  const safeName = escapeXml(String(opts.name ?? "").slice(0, 24)).trim() || "宠物";
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 360" width="340" height="360" role="img" aria-label="${safeName}">
   <defs>
     <radialGradient id="shadow" cx="0.5" cy="0.5" r="0.5">
       <stop offset="0%" stop-color="#000" stop-opacity="0.20"/><stop offset="100%" stop-color="#000" stop-opacity="0"/>
@@ -141,6 +164,11 @@ export function renderPetSvg(opts: { species: string; palette: string[]; name: s
     <ellipse cx="208" cy="332" rx="24" ry="13" fill="${c1.base}" stroke="${c1.dark}" stroke-width="4"/>
   </g>
 </svg>`;
+}
+
+/** 供测试与其它模块复用的转义入口 */
+export function escapeXmlViaRender(input: string): string {
+  return escapeXml(input);
 }
 
 function escapeXml(input: string): string {

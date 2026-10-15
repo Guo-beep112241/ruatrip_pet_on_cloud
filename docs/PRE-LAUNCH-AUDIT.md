@@ -70,11 +70,11 @@
 
 ### 阶段 1：安全加固 —— P0 漏洞（S1~S5）
 
-- [ ] **S1** SVG 注入：`species` / `palette` 白名单校验 + 文本插值全转义 + SVG 响应加 CSP
-- [ ] **S2** CORS：改为严格白名单，不匹配就不设 ACAO 头；去掉 `*` + credentials 的非法组合
-- [ ] **S3** 静态托管：拦掉点开头路径与敏感文件，返回 404 而不是 index.html
-- [ ] **S4** 安全响应头：CSP / X-Content-Type-Options / Referrer-Policy / X-Frame-Options / Permissions-Policy
-- [ ] **S5** 限流：滑动窗口限流中间件，对 `/api/chat`、`/api/travel/checkin` 等昂贵接口单独放宽/收紧
+- [x] **S1** SVG 注入：`species` / `palette` 白名单校验 + 文本插值全转义 + SVG 响应加 CSP
+- [x] **S2** CORS：改为严格白名单，不匹配就不设 ACAO 头；去掉 `*` + credentials 的非法组合
+- [x] **S3** 静态托管：拦掉点开头路径与敏感文件，返回 404 而不是 index.html
+- [x] **S4** 安全响应头：CSP / X-Content-Type-Options / Referrer-Policy / X-Frame-Options / Permissions-Policy
+- [x] **S5** 限流：滑动窗口限流中间件，对 `/api/chat`、`/api/travel/checkin` 等昂贵接口单独放宽/收紧
 
 ### 阶段 2：数据层与持久化（B1、B3、B4）
 
@@ -139,7 +139,7 @@ npm start           # 生产模式端到端可用
 | 阶段 | 状态 | 提交 |
 | --- | --- | --- |
 | 审计 | ✅ 完成 | — |
-| 1 安全加固（S1~S5） | ⏳ 待开始 | — |
+| 1 安全加固（S1~S5） | ✅ 完成 | `fix(security): 修复 SVG 注入、CORS 通配、敏感路径探测；加入安全头与双层限流` |
 | 2 数据层与持久化（B1、B3、B4） | ⏳ 待开始 | — |
 | 3 账号体系（B2、F5、F6） | ⏳ 待开始 | — |
 | 4 健壮性（M1~M7） | ⏳ 待开始 | — |
@@ -147,3 +147,24 @@ npm start           # 生产模式端到端可用
 | 6 工程化（O1~O5） | ⏳ 待开始 | — |
 
 > 本表在每阶段完成后更新，并附上对应的 commit hash。
+
+### 阶段 1 的验证证据
+
+每条缺陷都补了自动化回归测试（`apps/server/tests/security.test.ts`，18 个用例），
+并且对**运行中的服务发了真实请求**验证：
+
+| 缺陷 | 验证方式 | 修复后结果 |
+| --- | --- | --- |
+| S1 SVG 注入 | `?species=</text><script>alert(1)</script>` | script 标签数 = 0；白名单外一律回落默认形象 |
+| S2 CORS 通配 | 带 `Origin: https://evil.example.com` 请求 | 不返回任何 `Access-Control-*` 通配头（浏览器自行拦截） |
+| S3 敏感路径 | 遍历 `/.env`、`/.git/config`、`/Dockerfile`、`/backup.sql` | 全部 404；前端路由与静态资源不受影响 |
+| S4 安全头 | 检查响应头 | nosniff / DENY / Referrer-Policy / Permissions-Policy / CSP 全部就位 |
+| S5 限流 | 连打 `/api/chat` 25 次 | 第 21 次返回 429（额度 20/分钟），带 `Retry-After` 与额度头 |
+
+**加 CSP 时发现并修复的两个连带问题**（这类问题只有真在浏览器里跑才会暴露）：
+1. Google Fonts 的样式表被 `style-src` 拦掉 → 放行 `fonts.googleapis.com`
+2. 我最初写的 `onload="this.media='all'"` 内联事件被 CSP 拦掉 → 改为由 `main.tsx` 切换 media，
+   避免为此放开 `script-src 'unsafe-inline'`（那等于给 XSS 开后门）
+
+顺手修掉的兼容性问题：Node 的类型剥离模式不支持 TS「构造函数参数属性」，
+全项目 3 处已改为显式字段声明（否则 `npm test` 一 import 就报 ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX）。

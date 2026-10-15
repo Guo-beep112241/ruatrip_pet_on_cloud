@@ -12,12 +12,27 @@
       content="RuaTrip（Rua途）——给无法养真宠物的人，一个可以云养、能真心聊天、能一起旅行打卡、还会自动做手账的毛绒搭子。"
     />
     <title>RuaTrip · Rua途</title>
+    <!--
+      Quicksand 字体：国内访问可能不稳定。用 media="print" + onload 的技巧做成
+      「非阻塞加载」——加载失败时页面照常渲染，只是字形退化为系统圆体，
+      不会白屏、不会阻塞首屏。
+      切换 media 的动作由 src/main.tsx 完成（不用内联 onload，否则需要放开 CSP 的
+      script-src 'unsafe-inline'，那等于给 XSS 开后门）。
+    -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&display=swap"
+      id="quicksand-stylesheet"
       rel="stylesheet"
+      media="print"
+      href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&display=swap"
     />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&display=swap"
+      />
+    </noscript>
   </head>
   <body>
     <div id="root"></div>

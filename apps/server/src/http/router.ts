@@ -15,34 +15,44 @@ export interface Ctx {
 
 export type Handler = (ctx: Ctx) => Promise<unknown> | unknown;
 
+export interface RouteOptions {
+  /** 是否由 handler 自己写 res（二进制响应） */
+  raw?: boolean;
+  /** 限流分桶名（见 http/rateLimit.ts 的 RATE_LIMITS）。不传则按读写自动归类 */
+  bucket?: string;
+}
+
 interface Route {
   method: string;
   segments: string[];
   handler: Handler;
-  /** 是否为二进制响应（由 handler 自己写 res） */
   raw?: boolean;
+  bucket?: string;
 }
 
 export class Router {
   private routes: Route[] = [];
 
-  add(method: string, path: string, handler: Handler, raw = false): this {
+  add(method: string, path: string, handler: Handler, options: RouteOptions | boolean = {}): this {
+    // 兼容旧的 raw 布尔写法，避免一次性改动所有路由
+    const opts: RouteOptions = typeof options === 'boolean' ? { raw: options } : options;
     this.routes.push({
       method: method.toUpperCase(),
       segments: path.split('/').filter(Boolean),
       handler,
-      raw,
+      ...(opts.raw !== undefined ? { raw: opts.raw } : {}),
+      ...(opts.bucket !== undefined ? { bucket: opts.bucket } : {}),
     });
     return this;
   }
 
-  get(path: string, handler: Handler, raw = false) { return this.add('GET', path, handler, raw); }
-  post(path: string, handler: Handler, raw = false) { return this.add('POST', path, handler, raw); }
-  patch(path: string, handler: Handler, raw = false) { return this.add('PATCH', path, handler, raw); }
-  put(path: string, handler: Handler, raw = false) { return this.add('PUT', path, handler, raw); }
-  delete(path: string, handler: Handler, raw = false) { return this.add('DELETE', path, handler, raw); }
+  get(path: string, handler: Handler, options: RouteOptions | boolean = {}) { return this.add('GET', path, handler, options); }
+  post(path: string, handler: Handler, options: RouteOptions | boolean = {}) { return this.add('POST', path, handler, options); }
+  patch(path: string, handler: Handler, options: RouteOptions | boolean = {}) { return this.add('PATCH', path, handler, options); }
+  put(path: string, handler: Handler, options: RouteOptions | boolean = {}) { return this.add('PUT', path, handler, options); }
+  delete(path: string, handler: Handler, options: RouteOptions | boolean = {}) { return this.add('DELETE', path, handler, options); }
 
-  match(method: string, pathname: string): { handler: Handler; params: Record<string, string> } | null {
+  match(method: string, pathname: string): { handler: Handler; params: Record<string, string>; bucket?: string } | null {
     const parts = pathname.split('/').filter(Boolean);
     for (const route of this.routes) {
       if (route.method !== method.toUpperCase()) continue;
@@ -55,7 +65,7 @@ export class Router {
         if (seg.startsWith(':')) params[seg.slice(1)] = decodeURIComponent(value);
         else if (seg !== value) { ok = false; break; }
       }
-      if (ok) return { handler: route.handler, params };
+      if (ok) return { handler: route.handler, params, ...(route.bucket ? { bucket: route.bucket } : {}) };
     }
     return null;
   }
