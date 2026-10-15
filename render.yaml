@@ -23,6 +23,15 @@ services:
       # Render 会自动注入 PORT，服务端已按 PORT 监听，无需手动设置
       - key: DATA_DIR
         value: /var/data
+      # ---- 认证（必填，否则生产环境拒绝启动）----
+      # 在 Render 控制台填一个 32 位以上随机串
+      - key: SESSION_SECRET
+        sync: false
+      - key: AUTH_MODE
+        value: required
+      # ---- 持久化：建议接 Postgres，见 docs/DEPLOYMENT.md ----
+      - key: DATABASE_URL
+        sync: false
       # 部署完成后，把你的正式访问地址填进来（用于 CORS 白名单）
       # 例如 https://ruatrip.onrender.com,https://你的域名.com
       - key: CORS_ORIGIN

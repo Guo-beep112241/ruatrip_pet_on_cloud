@@ -26,13 +26,66 @@ export class ApiError extends Error {
 
 const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') || '/api';
 
+/* ============================================================
+ * 会话 token（审计 B2）
+ * ============================================================ */
+
+const TOKEN_KEY = 'ruatrip.token';
+
+/**
+ * token 存 localStorage：Web 端没有更安全的选择
+ * （httpOnly cookie 需要服务端会话与 CSRF 防护，本项目用无状态 token）。
+ * 因此 XSS 是最高优先级风险 —— 这也是为什么服务端加了 CSP、
+ * 并且 SVG 注入被当作 P0 修掉。线上务必保持 CSP 开启。
+ */
+export function getToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* 隐私模式下 localStorage 可能不可用，此时退化为「仅当前会话有效」 */
+  }
+}
+
+export function isLoggedIn(): boolean {
+  return Boolean(getToken());
+}
+
+/** 会话失效时通知应用回到登录页（由 store 注册回调，避免循环依赖） */
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
+/** 这些错误码表示会话已不可用，前端应该清 token 并回到登录页 */
+const SESSION_ERROR_CODES = new Set([
+  'AUTH_REQUIRED',
+  'INVALID_SESSION',
+  'SESSION_EXPIRED',
+  'SESSION_REVOKED',
+  'ACCOUNT_NOT_FOUND',
+]);
+
 type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 async function request<T>(method: Method, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const url = `${BASE}${path}`;
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  const token = getToken();
+  if (token) headers.authorization = `Bearer ${token}`;
+
   const init: RequestInit = {
     method,
-    headers: body === undefined ? {} : { 'content-type': 'application/json' },
+    headers,
     ...(signal ? { signal } : {}),
   };
   if (body !== undefined) init.body = JSON.stringify(body);
@@ -57,7 +110,14 @@ async function request<T>(method: Method, path: string, body?: unknown, signal?:
   const payload = json as { ok?: boolean; data?: T; error?: ApiFailureShape } | null;
   if (!res.ok || !payload?.ok) {
     const err = payload?.error;
-    throw new ApiError(res.status, err?.code ?? 'UNKNOWN', err?.message ?? `请求失败（${res.status}）`, err?.detail);
+    const code = err?.code ?? 'UNKNOWN';
+    // 会话失效：清掉本地 token 并让应用回到登录页，
+    // 否则用户会一直看到「连不上服务端」而不知道要重新登录。
+    if (SESSION_ERROR_CODES.has(code)) {
+      setToken(null);
+      onUnauthorized?.();
+    }
+    throw new ApiError(res.status, code, err?.message ?? `请求失败（${res.status}）`, err?.detail);
   }
   return payload.data as T;
 }
@@ -105,7 +165,12 @@ export async function uploadImage(file: File, purpose = 'photo'): Promise<Upload
 
   let res: Response;
   try {
-    res = await fetch(`${BASE}/upload`, { method: 'POST', body: form });
+    const token = getToken();
+    res = await fetch(`${BASE}/upload`, {
+      method: 'POST',
+      body: form,
+      ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}),
+    });
   } catch (error) {
     throw new ApiError(0, 'NETWORK_ERROR', '上传失败：连不上服务端。', error);
   }
@@ -130,8 +195,10 @@ export async function uploadImage(file: File, purpose = 'photo'): Promise<Upload
 export async function deleteUpload(key: string): Promise<boolean> {
   const [owner, file] = key.split('/');
   if (!owner || !file) return false;
+  const token = getToken();
   const res = await fetch(`${BASE}/upload/${encodeURIComponent(owner)}/${encodeURIComponent(file)}`, {
     method: 'DELETE',
+    ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}),
   });
   if (!res.ok) return false;
   const json = (await res.json()) as { ok?: boolean; data?: { removed?: boolean } };
@@ -172,3 +239,54 @@ function canvasFrom(bitmap: ImageBitmap): HTMLCanvasElement {
   ctx?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   return canvas;
 }
+
+
+/* ============================================================
+ * 认证接口（审计 B2）
+ * ============================================================ */
+
+export interface AuthStatus {
+  hasAccounts: boolean;
+  accountCount: number;
+  mode: 'required' | 'optional';
+  requiresSetup: boolean;
+  authenticated: boolean;
+  legacyClaimAvailable: boolean;
+}
+
+export interface AuthSession {
+  token: string;
+  user: import('./types').UserProfile;
+}
+
+export const auth = {
+  status: () => request<AuthStatus>('GET', '/auth/status'),
+  me: () => request<{ user: import('./types').UserProfile; authenticated: boolean }>('GET', '/auth/me'),
+
+  async register(input: { email: string; password: string; nickname?: string }): Promise<AuthSession> {
+    const session = await request<AuthSession>('POST', '/auth/register', input);
+    setToken(session.token);
+    return session;
+  },
+
+  async login(input: { email: string; password: string }): Promise<AuthSession> {
+    const session = await request<AuthSession>('POST', '/auth/login', input);
+    setToken(session.token);
+    return session;
+  },
+
+  async changePassword(input: { currentPassword: string; newPassword: string }): Promise<AuthSession> {
+    const session = await request<AuthSession>('POST', '/auth/password', input);
+    setToken(session.token);
+    return session;
+  },
+
+  async deleteAccount(input: { password: string; confirm: string }): Promise<void> {
+    await request('DELETE', '/auth/account', input);
+    setToken(null);
+  },
+
+  logout(): void {
+    setToken(null);
+  },
+};

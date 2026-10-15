@@ -4,7 +4,7 @@ import { Baby, Check, Copy, KeyRound, Sparkles, Users } from 'lucide-react';
 import { AppShell } from '../components/AppShell';
 import { Button, Card, Chip, SectionTitle, Sheet } from '../components/ui';
 import { useApp } from '../store/app';
-import { api, withQuery } from '../api/client';
+import { api, auth, withQuery } from '../api/client';
 import { SUBSCRIPTION_PLANS } from '../api/types';
 import type { FosterListResponse, IntegrationStatus, ProfileResponse, SubscriptionTier } from '../api/types';
 
@@ -285,6 +285,12 @@ export function Profile() {
           </ul>
         </Card>
 
+        {/* 账号与数据（审计 F5：删除通道） */}
+        <Card>
+          <SectionTitle title="账号与数据" hint="你的宠物、记忆、照片都只属于这个账号。可以随时注销并彻底删除。" />
+          <AccountPanel onDone={() => void loadProfile()} />
+        </Card>
+
         {/* 设置 */}
         <Card>
           <SectionTitle title="设置与安全" hint="未成年人保护与消费限额必须显式可配。" />
@@ -427,6 +433,131 @@ const CATEGORY_LABEL: Record<string, string> = {
   push: '推送通知',
   analytics: '行为埋点',
 };
+
+/**
+ * 账号面板：改密码 / 注销账号（含数据删除）。
+ *
+ * 注销是不可逆操作，所以要求输入密码 + 手打 DELETE 确认；
+ * 服务端也会再次校验，前端这层只是防误触。
+ */
+function AccountPanel({ onDone }: { onDone: () => void }) {
+  const pushToast = useApp((s) => s.pushToast);
+  const [open, setOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [deletePassword, setDeletePassword] = useState('');
+  const [confirmText, setConfirmText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [pwdOpen, setPwdOpen] = useState(false);
+
+  const changePassword = async () => {
+    setBusy(true);
+    try {
+      await auth.changePassword({ currentPassword, newPassword });
+      pushToast('密码已更新，其它设备需要重新登录。', 'warm', '🔐');
+      setPwdOpen(false);
+      setCurrentPassword('');
+      setNewPassword('');
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : '修改失败', 'warning', '🔐');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteAccount = async () => {
+    if (confirmText !== 'DELETE') {
+      pushToast('请输入 DELETE 以确认', 'warning', '⚠️');
+      return;
+    }
+    setBusy(true);
+    try {
+      await auth.deleteAccount({ password: deletePassword, confirm: 'DELETE' });
+      // token 已被清掉，刷新回登录页
+      window.location.reload();
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : '注销失败', 'warning', '⚠️');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-snug">
+      <div className="flex flex-wrap gap-snug">
+        <Button variant="quiet" onClick={() => setPwdOpen((v) => !v)}>
+          <KeyRound size={14} aria-hidden />
+          修改密码
+        </Button>
+        <Button variant="quiet" onClick={() => void (async () => {
+          auth.logout();
+          window.location.reload();
+        })()}>
+          退出登录
+        </Button>
+        <Button variant="ghost" onClick={() => setOpen((v) => !v)}>
+          {open ? '收起' : '注销账号并删除数据'}
+        </Button>
+      </div>
+
+      {pwdOpen ? (
+        <div className="space-y-snug rounded-card bg-surface-sunken/60 p-snug">
+          <input
+            type="password"
+            className="rt-input"
+            placeholder="当前密码"
+            autoComplete="current-password"
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
+          />
+          <input
+            type="password"
+            className="rt-input"
+            placeholder="新密码（至少 8 位，含字母和数字）"
+            autoComplete="new-password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+          />
+          <Button block onClick={() => void changePassword()} disabled={busy || !currentPassword || !newPassword}>
+            确认修改
+          </Button>
+          <p className="text-caption text-text-muted">修改后，其它设备上的登录会立即失效。</p>
+        </div>
+      ) : null}
+
+      {open ? (
+        <div className="space-y-snug rounded-card border border-state-danger/40 bg-state-danger/8 p-snug">
+          <p className="text-body-sm font-bold text-text-primary">这一步不可撤销</p>
+          <p className="text-caption leading-relaxed text-text-secondary">
+            会删除这个账号下的全部数据：宠物资产母版、好感度与互动记录、对话与记忆、打卡与手账、
+            上传的照片、时光胶囊。删除后无法恢复。
+          </p>
+          <input
+            type="password"
+            className="rt-input"
+            placeholder="输入密码确认"
+            autoComplete="current-password"
+            value={deletePassword}
+            onChange={(e) => setDeletePassword(e.target.value)}
+          />
+          <input
+            className="rt-input"
+            placeholder="输入 DELETE 以确认"
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+          />
+          <Button
+            variant="danger"
+            block
+            onClick={() => void deleteAccount()}
+            disabled={busy || confirmText !== 'DELETE' || !deletePassword}
+          >
+            确认注销并删除全部数据
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function Stat({ label, value, suffix }: { label: string; value: number; suffix: string }) {
   return (

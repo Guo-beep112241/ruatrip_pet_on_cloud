@@ -16,7 +16,7 @@ import type {
   SubmitSurveyResponse,
   UserProfile,
 } from '../api/types';
-import { api, withQuery } from '../api/client';
+import { api, isLoggedIn, setUnauthorizedHandler, withQuery } from '../api/client';
 
 export type Screen = 'onboarding' | 'cabin' | 'hut' | 'travel' | 'checkin' | 'capsule' | 'profile';
 
@@ -31,6 +31,8 @@ interface AppState {
   ready: boolean;
   loading: boolean;
   error: string | null;
+  /** 会话不可用（未登录或已过期）→ 显示登录页 */
+  authRequired: boolean;
 
   user: UserProfile | null;
   pet: Pet | null;
@@ -93,6 +95,7 @@ export const useApp = create<AppState & AppActions>((set, get) => ({
   ready: false,
   loading: false,
   error: null,
+  authRequired: !isLoggedIn(),
   user: null,
   pet: null,
   integration: [],
@@ -119,6 +122,7 @@ export const useApp = create<AppState & AppActions>((set, get) => ({
       set({
         ready: true,
         loading: false,
+        authRequired: false,
         user: data.user,
         pet: data.pet,
         integration: data.integration,
@@ -131,10 +135,14 @@ export const useApp = create<AppState & AppActions>((set, get) => ({
         if (!generationDone) await get().pollGeneration();
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : '初始化失败';
+      // 会话问题不是「错误」，而是「需要登录」——不要显示成红色故障
+      const needsAuth = /登录|会话|需要先登录|AUTH|SESSION/.test(message);
       set({
         ready: true,
         loading: false,
-        error: error instanceof Error ? error.message : '初始化失败',
+        authRequired: needsAuth || !isLoggedIn(),
+        error: needsAuth ? null : message,
       });
     }
   },

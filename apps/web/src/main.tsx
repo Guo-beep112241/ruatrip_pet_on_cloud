@@ -1,7 +1,18 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
+import { setUnauthorizedHandler } from './api/client';
+import { useApp } from './store/app';
 import './styles/global.css';
+
+/**
+ * 会话失效时回到登录页。
+ * 在 client 里直接 import store 会形成循环依赖（store 依赖 client），
+ * 所以用回调注册的方式解耦。
+ */
+setUnauthorizedHandler(() => {
+  useApp.setState({ authRequired: true, error: null });
+});
 
 /**
  * 字体非阻塞加载的第二步。

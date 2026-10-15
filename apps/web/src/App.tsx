@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useApp } from './store/app';
 import { useHashRouter } from './hooks/useHashRouter';
+import { Auth } from './pages/Auth';
 import { Onboarding } from './pages/Onboarding';
 import { PetCabin } from './pages/PetCabin';
 import { TruthHut } from './pages/TruthHut';
@@ -14,12 +15,16 @@ export function App() {
   const ready = useApp((s) => s.ready);
   const pet = useApp((s) => s.pet);
   const screen = useApp((s) => s.screen);
+  const authRequired = useApp((s) => s.authRequired);
 
   useHashRouter();
 
   useEffect(() => {
     void bootstrap();
   }, [bootstrap]);
+
+  // 会话不可用 → 先登录（审计 B2）
+  if (authRequired) return <Auth />;
 
   // 没有宠物时，无论 hash 指向哪，都先走孵化流程（首日必须交付完整体验）
   if (!ready) {

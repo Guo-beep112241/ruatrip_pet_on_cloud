@@ -359,6 +359,23 @@ services 与 routes 完全不用动。什么时候必须做这个改造：
 - 用户数上万（内存快照会撑不住）
 - 多实例部署（各实例缓存互不可见）
 
+## 11.5 认证与第三方登录
+
+**已实现**：邮箱 + 密码注册登录（`POST /api/auth/register` / `/login`），
+无状态 HMAC 会话 token，逐资源归属校验。
+
+**需要接入第三方时**（国内上线通常需要手机号或微信）：
+
+| 通道 | 需要的环境变量 | 改动位置 |
+| --- | --- | --- |
+| 短信验证码 | `SMS_PROVIDER`、`SMS_ACCESS_KEY`、`SMS_SECRET`、`SMS_SIGN_NAME`、`SMS_TEMPLATE_CODE` | 新增 `adapters/sms.ts`；`AccountRecord.phone` 字段已预留 |
+| 微信登录 | `WECHAT_APP_ID`、`WECHAT_APP_SECRET` | 新增 `adapters/wechat.ts`；`AccountRecord.wechatOpenId` 字段已预留 |
+| 邮箱验证 / 找回密码 | `MAIL_PROVIDER`、`MAIL_API_KEY`、`MAIL_FROM` | 新增 `adapters/mail.ts` |
+| 人机验证（防批量注册） | `CAPTCHA_PROVIDER`、`CAPTCHA_SECRET` | 在 `POST /api/auth/register` 前校验 |
+
+接入方式与其它能力一致：加一个 provider class，在 `resolveAuth` 或注册路由里调用即可，
+现有账号结构已经预留了 `phone` 与 `wechatOpenId` 字段。
+
 ## 12. 接入后的自检清单
 
 ```bash
