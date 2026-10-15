@@ -1,0 +1,18 @@
+{
+  "name": "@ruatrip/theme",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./tokens": "./src/tokens.ts",
+    "./tailwind-preset": "./src/tailwind-preset.cjs",
+    "./tokens.json": "./src/tokens.json"
+  },
+  "scripts": {
+    "gen": "node ./scripts/build-tokens.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

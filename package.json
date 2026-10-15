@@ -1,0 +1,27 @@
+{
+  "name": "ruatrip-best-pet-friends",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "description": "RuaTrip（Rua途）v2.0 — 3D 云养宠 · 真心话小屋 · 旅行打卡手账（Web 端，支持电脑端与移动端）",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,web -c magenta,cyan \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev --workspace @ruatrip/server",
+    "dev:web": "npm run dev --workspace @ruatrip/web",
+    "build": "npm run build --workspace @ruatrip/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "start": "npm run start --workspace @ruatrip/server",
+    "gen:theme": "node packages/theme/scripts/build-tokens.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
