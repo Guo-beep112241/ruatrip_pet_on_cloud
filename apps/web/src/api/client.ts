@@ -205,7 +205,15 @@ export async function deleteUpload(key: string): Promise<boolean> {
   return Boolean(json?.data?.removed);
 }
 
-/** 把一张图片压缩到指定上限内（客户端先减负，避免上传被拒） */
+/**
+ * 把一张图片压缩到指定上限内（审计 M2）。
+ *
+ * 客户端必须先减负：手机直出照片常 4~8MB，直接上传要么被拒、
+ * 要么白耗流量。这里压到 1600px 长边 + 渐进降质，通常能到 300KB~1MB。
+ *
+ * 与服务端的 MAX_IMAGE_BYTES 保持一致（默认 4MB），
+ * 这样「客户端放过 → 服务端拒掉」的矛盾不会出现。
+ */
 export async function compressImage(file: File, maxBytes = 4 * 1024 * 1024): Promise<File> {
   if (file.size <= maxBytes) return file;
   // 用 canvas 渐进降质；失败就原样返回，让服务端给出明确提示
@@ -224,9 +232,22 @@ export async function compressImage(file: File, maxBytes = 4 * 1024 * 1024): Pro
       return new File([blob], file.name.replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg' });
     }
   } catch {
-    /* 浏览器不支持时走原文件，由服务端校验 */
+    /* 浏览器不支持（如旧版 Safari 没有 createImageBitmap）→ 走原文件 */
   }
+  // 压缩没成功时仍返回原文件：让服务端给出精确的体积提示，
+  // 好过在这里静默失败让用户不知道发生了什么。
   return file;
+}
+
+/** 上传前的本地预检，返回 null 表示可以上传 */
+export function precheckImage(file: File, maxBytes = 4 * 1024 * 1024): string | null {
+  if (!file.type.startsWith('image/')) {
+    return '只能上传图片（JPEG / PNG / WebP / GIF / AVIF）';
+  }
+  if (file.size > maxBytes) {
+    return `这张照片 ${(file.size / 1024 / 1024).toFixed(1)}MB，超过 ${(maxBytes / 1024 / 1024).toFixed(0)}MB 上限。我们会先压缩，如果仍然失败请换一张。`;
+  }
+  return null;
 }
 
 function canvasFrom(bitmap: ImageBitmap): HTMLCanvasElement {

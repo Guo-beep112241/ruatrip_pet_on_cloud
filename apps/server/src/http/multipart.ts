@@ -119,3 +119,10 @@ export function numberField(
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, parsed));
 }
+
+
+/** 判断请求是否为 multipart/form-data 并取出 boundary */
+export function multipartBoundary(contentType: string | string[] | undefined): string | null {
+  const value = Array.isArray(contentType) ? contentType[0] : contentType;
+  return parseBoundary(value);
+}
