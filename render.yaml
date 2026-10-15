@@ -1,0 +1,52 @@
+# ============================================================
+# Render 一键部署配置
+#
+# 用法：Render 控制台 → New → Blueprint → 选这个仓库，会自动读取本文件。
+# 说明：这是一个「长驻 Node 服务」，前端由它同源托管，所以只需要一个 Web Service。
+# ⚠️ Render 的免费实例 15 分钟无请求会休眠，下次访问要等约 50 秒冷启动；
+#    想要常驻请改成 plan: starter（约 $7/月）。
+# ============================================================
+
+services:
+  - type: web
+    name: ruatrip
+    runtime: node
+    region: singapore          # 离国内最近；也可选 oregon / frankfurt
+    plan: free                 # 改成 starter 可避免休眠
+    buildCommand: npm ci --no-audit --no-fund && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render 会自动注入 PORT，服务端已按 PORT 监听，无需手动设置
+      - key: DATA_DIR
+        value: /var/data
+      # 部署完成后，把你的正式访问地址填进来（用于 CORS 白名单）
+      # 例如 https://ruatrip.onrender.com,https://你的域名.com
+      - key: CORS_ORIGIN
+        sync: false
+      # ---- 以下全部是可选的 AI / 3D / 语音能力，在 Render 控制台里填 ----
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: TRIPO_API_KEY
+        sync: false
+      - key: MESHY_API_KEY
+        sync: false
+      - key: MINIMAX_API_KEY
+        sync: false
+      - key: MINIMAX_GROUP_ID
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+    disk:
+      # 持久化 JSON 存储，避免每次重新部署数据被清空
+      # ⚠️ 挂载磁盘需要付费实例（starter 及以上）
+      name: ruatrip-data
+      mountPath: /var/data
+      sizeGB: 1

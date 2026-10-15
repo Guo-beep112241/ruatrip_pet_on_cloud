@@ -26,6 +26,8 @@ npm run typecheck  # 全量类型检查
 
 > 桌面端请把浏览器窗口拉到 ≥ 1024px 宽，会切换成左侧栏 + 双栏布局；手机上直接打开 5173 端口即可（Vite 已开 `host: true`）。
 
+**想部署到公网**：见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。一句话结论：`vercel.app` 在国内被墙（实测 3 个域名全部超时），推荐「国内轻量服务器 + Docker」或「Netlify/GitHub Pages 放前端 + Render 放后端」。仓库已带 `Dockerfile` 与 `render.yaml`，可直接用。
+
 ---
 
 ## 🚨 需要你介入 API 的地方（最重要的一节）
@@ -194,4 +196,5 @@ npm test
 - [视觉设计规范 · 毛绒实木](docs/视觉设计规范-毛绒实木.md) — 视觉唯一事实来源
 - [API 接入手册](docs/API-INTEGRATION.md) — **需要你介入 API 的全部位置**
 - [技术架构](docs/ARCHITECTURE.md) — 数据流、工程原则落地、升级路径、自测记录
+- [上线部署指南](docs/DEPLOYMENT.md) — **国内免梯子访问的实测方案**与上线前必做的 7 项检查
 - [确认的信息架构](docs/confirmed-ia.json) / [线框图](docs/wireframe.jpg)

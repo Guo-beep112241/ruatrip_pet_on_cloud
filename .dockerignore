@@ -1,0 +1,26 @@
+# 构建镜像时不需要的东西，减小镜像体积、避免把密钥带进去
+node_modules
+**/node_modules
+
+# 构建产物（镜像内部会重新构建）
+apps/web/dist
+dist
+build
+
+# 绝不进镜像：密钥与本地数据
+.env
+.env.local
+.env.*.local
+.data
+*.tsbuildinfo
+
+# 开发与文档
+.git
+.gitignore
+.vscode
+.DS_Store
+*.log
+coverage
+docs
+README.md
+AGENTS.md
