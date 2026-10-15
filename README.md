@@ -20,7 +20,7 @@ npm run dev        # 后端 http://localhost:8787 ＋ 前端 http://localhost:51
 ```bash
 npm run build      # 构建前端
 npm start          # 生产模式：后端同源托管前端，只需 http://localhost:8787 一个地址
-npm test           # 32 个单元测试
+npm test           # 71 个测试
 npm run typecheck  # 全量类型检查
 ```
 
@@ -150,11 +150,13 @@ RUATRIP_BEST_PET_FRIENDS/
 npm test
 ```
 
-32 个单元测试分三组：
+71 个测试分四组：
 
 - **规则层（10 个）**：好感度数值口径（次数上限、衰减、单日上限）、等级曲线、想念值区间、情绪推导优先级
 - **安全层（13 个）**：人格卡生成、跨物种说话风格差异、system prompt 完整性、四类内容安全过滤（自我认知/医疗/成人/高风险）、后置审核泄漏清理、即时层预设池完整性
 - **模型接入层（9 个，集成测试）**：起一个本地假模型端点，验证「换个模型就能用」这条路真的通 —— 请求格式、`reasoning_content` 不被误读、401/402/404 翻译成可照做提示、空回复判定、失败必回落 Mock、改 `.env` 免重启生效
+- **安全层（18 个）**：SVG 注入、CORS 白名单、CSP、限流滑动窗口、每日成本闸门、`X-Forwarded-For` 取真实客户端
+- **存储层（21 个）**：图片魔数校验、体积上限、路径穿越防护、multipart 二进制完整性、图片引用白名单、防抖合并落盘、原子写入、坏档恢复、数据目录消失不崩
 
 端到端行为已手工验证并记录在 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 第 9 节。
 
@@ -197,4 +199,5 @@ npm test
 - [API 接入手册](docs/API-INTEGRATION.md) — **需要你介入 API 的全部位置**
 - [技术架构](docs/ARCHITECTURE.md) — 数据流、工程原则落地、升级路径、自测记录
 - [上线部署指南](docs/DEPLOYMENT.md) — **国内免梯子访问的实测方案**与上线前必做的 7 项检查
+- [上线前审计清单](docs/PRE-LAUNCH-AUDIT.md) — 27 项待办、分级、执行计划与逐项验证证据
 - [确认的信息架构](docs/confirmed-ia.json) / [线框图](docs/wireframe.jpg)
