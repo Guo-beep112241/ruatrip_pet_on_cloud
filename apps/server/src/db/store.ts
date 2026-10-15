@@ -24,6 +24,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { diffSnapshot, type PersistBatch, type PersistenceDriver } from './driver.ts';
 import { FileDriver } from './drivers.ts';
+import type { AccountRecord } from '../auth/index.ts';
 import type {
   AffectionLogEntry,
   Badge,
@@ -44,7 +45,14 @@ import type {
 
 export interface StoreSchema {
   version: number;
+  /**
+   * 旧版单用户字段。
+   * 保留是为了兼容既有存档：首次启动时会被迁移进 `users` 并清空。
+   * 新代码不要再直接读写它。
+   */
   user: UserProfile | null;
+  /** 账号集合（含凭据哈希；绝不整体返回给前端） */
+  users: AccountRecord[];
   surveyAnswers: PreferenceAnswers | null;
   pets: Pet[];
   generationJobs: GenerationJob[];
@@ -65,6 +73,7 @@ export interface StoreSchema {
 export const emptyStore = (): StoreSchema => ({
   version: 1,
   user: null,
+  users: [],
   surveyAnswers: null,
   pets: [],
   generationJobs: [],
@@ -335,6 +344,7 @@ function mergeSchema(loaded: Partial<StoreSchema>): StoreSchema {
 const SINGLETON_OBJECT_KEYS = ['user', 'surveyAnswers'] as const;
 
 const ARRAY_KEYS = [
+  'users',
   'pets',
   'generationJobs',
   'interactions',

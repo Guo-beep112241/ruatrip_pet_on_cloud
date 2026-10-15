@@ -105,6 +105,7 @@ interface SqliteModule {
  * 的业务查询都发生在内存里（见 Store 的设计），数据库只承担持久化职责。
  * 这样表结构极简，迁移与排错都容易。
  */
+/** 现在只剩这两个是单例；`user` 作为旧版遗留单例保留读兼容 */
 const SINGLETON_KEYS = ['user', 'surveyAnswers', 'meta'] as const;
 
 export class SqliteDriver implements PersistenceDriver {

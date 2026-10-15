@@ -18,6 +18,7 @@
 
 /** 集合名 = StoreSchema 里除 version/meta 之外的数组字段 */
 export type CollectionName =
+  | 'users'
   | 'pets'
   | 'generationJobs'
   | 'interactions'
@@ -33,6 +34,7 @@ export type CollectionName =
   | 'fosters';
 
 export const COLLECTIONS: CollectionName[] = [
+  'users',
   'pets',
   'generationJobs',
   'interactions',
@@ -48,7 +50,11 @@ export const COLLECTIONS: CollectionName[] = [
   'fosters',
 ];
 
-/** 单条记录必须有 id；singleton 记录（user / surveyAnswers / meta）没有 id */
+/**
+ * 单条记录必须有 id。
+ * `users` 也是带 id 的集合（多账号），不再是单例。
+ * 只剩 surveyAnswers / meta 是单例；旧版单例 `user` 保留兼容（首次启动会迁移）。
+ */
 export interface PersistRecord {
   id: string;
   data: unknown;
@@ -102,6 +108,7 @@ export function diffSnapshot(
     if (deletes.length) batch.deletes[name] = deletes;
   }
 
+  // 兼容旧单例 `user`：如果存在就当作唯一账号迁移进 users
   for (const name of ['user', 'surveyAnswers', 'meta'] as const) {
     const before = previous[name];
     const after = next[name];
