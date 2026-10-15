@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { diffSnapshot, type PersistBatch, type PersistenceDriver } from './driver.ts';
 import { FileDriver } from './drivers.ts';
 import type { AccountRecord } from '../auth/index.ts';
+import type { SpendEntry } from '../services/billing.ts';
 import type {
   AffectionLogEntry,
   Badge,
@@ -67,6 +68,8 @@ export interface StoreSchema {
   postcards: Postcard[];
   capsules: CapsuleProject[];
   fosters: FosterRequest[];
+  /** 消费台账（审计 F6）：用于月限额校验与对账 */
+  spendLedger: SpendEntry[];
   meta: Record<string, string | number | boolean>;
 }
 
@@ -88,6 +91,7 @@ export const emptyStore = (): StoreSchema => ({
   postcards: [],
   capsules: [],
   fosters: [],
+  spendLedger: [],
   meta: {},
 });
 
@@ -358,6 +362,7 @@ const ARRAY_KEYS = [
   'postcards',
   'capsules',
   'fosters',
+  'spendLedger',
 ] as const;
 
 function toPlain(schema: StoreSchema): Record<string, unknown> {

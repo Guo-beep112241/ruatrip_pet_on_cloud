@@ -31,7 +31,8 @@ export type CollectionName =
   | 'journals'
   | 'postcards'
   | 'capsules'
-  | 'fosters';
+  | 'fosters'
+  | 'spendLedger';
 
 export const COLLECTIONS: CollectionName[] = [
   'users',
@@ -48,6 +49,7 @@ export const COLLECTIONS: CollectionName[] = [
   'postcards',
   'capsules',
   'fosters',
+  'spendLedger',
 ];
 
 /**

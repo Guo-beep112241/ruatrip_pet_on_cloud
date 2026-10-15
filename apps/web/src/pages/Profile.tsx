@@ -6,7 +6,7 @@ import { Button, Card, Chip, SectionTitle, Sheet } from '../components/ui';
 import { useApp } from '../store/app';
 import { api, auth, withQuery } from '../api/client';
 import { SUBSCRIPTION_PLANS } from '../api/types';
-import type { FosterListResponse, IntegrationStatus, ProfileResponse, SubscriptionTier } from '../api/types';
+import type { BillingState, FosterListResponse, IntegrationStatus, PlanLimits, ProfileResponse, SubscriptionTier } from '../api/types';
 
 /** 屏6：我的 —— 成长数据 + 衣橱 + 好感度明细 + 订阅 + 设置 + 能力接入 */
 export function Profile() {
@@ -19,6 +19,8 @@ export function Profile() {
   const rename = useApp((s) => s.rename);
 
   const [stats, setStats] = useState<ProfileResponse['stats'] | null>(null);
+  const [billing, setBilling] = useState<BillingState | null>(null);
+  const [planLimits, setPlanLimits] = useState<PlanLimits | null>(null);
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [foster, setFoster] = useState<FosterListResponse | null>(null);
   const [friendName, setFriendName] = useState('');
@@ -28,8 +30,10 @@ export function Profile() {
 
   const loadProfile = async () => {
     try {
-      const data = await api.get<ProfileResponse>('/profile');
+      const data = await api.get<ProfileResponse & { billing: BillingState; planLimits: PlanLimits }>('/profile');
       setStats(data.stats);
+      setBilling(data.billing);
+      setPlanLimits(data.planLimits);
       useApp.setState({ user: data.user, pet: data.pet, integration: data.integration });
     } catch {
       /* 静默 */
@@ -224,8 +228,42 @@ export function Profile() {
               );
             })}
           </div>
+          {billing ? (
+            <div className="mt-snug space-y-1.5 rounded-card bg-surface-sunken/70 p-snug text-caption text-text-secondary">
+              <div className="flex justify-between">
+                <span>本月消费</span>
+                <span className="font-medium text-text-primary">
+                  ¥{billing.spentThisMonth} / ¥{billing.effectiveLimit}
+                  <span className="ml-1 text-text-muted">（剩余 ¥{billing.remaining}）</span>
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>宠物位</span>
+                <span className="font-medium text-text-primary">
+                  {billing.petCount} / {billing.petSlots} 只
+                </span>
+              </div>
+              {billing.singlePurchaseCap !== null ? (
+                <div className="flex justify-between">
+                  <span>未成年人保护</span>
+                  <span className="font-medium text-text-primary">
+                    已开启（单笔上限 ¥{billing.singlePurchaseCap}
+                    {planLimits ? `，月上限硬封顶 ¥${planLimits.minorMonthlyHardCap}` : ''}）
+                  </span>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <p className="mt-snug text-caption text-text-muted">
-            当前为<strong>模拟开通</strong>，只写状态不扣款。上线前需要接入真实支付通道，并补上未成年人消费限额校验。
+            {billing?.paymentConfigured ? (
+              <>已接入支付通道，扣款由支付服务完成。</>
+            ) : (
+              <>
+                当前为<strong>模拟开通</strong>，只写状态不扣款。限额校验已生效，
+                接入真实支付后逻辑不变（见 docs/API-INTEGRATION.md 第 7 节）。
+              </>
+            )}
           </p>
         </Card>
 

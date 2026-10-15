@@ -114,6 +114,19 @@ export function sendJson(res: ServerResponse, status: number, payload: unknown):
   res.end(body);
 }
 
-export function sendError(res: ServerResponse, status: number, code: string, message: string, extra?: Record<string, unknown>): void {
+/**
+ * 统一的错误响应。
+ *
+ * `code` 给程序判断，`message` 给人读，`detail` 放具体原因
+ * （例如「密码至少 8 位」「今天限额用完了，明天重置」）。
+ * 前端只展示 message + detail，不解析 code 之外的语义。
+ */
+export function sendError(
+  res: ServerResponse,
+  status: number,
+  code: string,
+  message: string,
+  extra?: Record<string, unknown>,
+): void {
   sendJson(res, status, { ok: false, error: { code, message, ...extra } });
 }

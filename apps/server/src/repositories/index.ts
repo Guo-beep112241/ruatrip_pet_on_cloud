@@ -20,6 +20,7 @@ import type {
   WishlistItem,
 } from '../../../../packages/shared/src/index.ts';
 import type { AccountRecord } from '../auth/index.ts';
+import { sumSpendThisMonth, type SpendEntry } from '../services/billing.ts';
 import { createDefaultProfile } from '../auth/index.ts';
 import type { Store } from '../db/store.ts';
 
@@ -174,8 +175,32 @@ export class Repositories {
       d.postcards = d.postcards.filter((p) => !petIds.has(p.petId));
       d.capsules = d.capsules.filter((c) => c.userId !== userId);
       d.fosters = d.fosters.filter((f) => f.ownerId !== userId && !petIds.has(f.petId));
+      // 消费台账也要清理（隐私与对账口径一致）
+      d.spendLedger = d.spendLedger.filter((e) => e.userId !== userId);
       return { removedPets };
     });
+  }
+
+  /* ---------------- 消费台账（审计 F6） ---------------- */
+
+  addSpend(entry: SpendEntry): SpendEntry {
+    return this.store.update((d) => {
+      d.spendLedger.push(entry);
+      return entry;
+    });
+  }
+
+  /** 某用户本月已消费金额 */
+  spentThisMonth(userId: string): number {
+    return sumSpendThisMonth(this.store.read().spendLedger, userId);
+  }
+
+  listSpend(userId: string, limit = 50): SpendEntry[] {
+    return this.store
+      .read()
+      .spendLedger.filter((e) => e.userId === userId)
+      .slice(-limit)
+      .reverse();
   }
 
   /* ---------------- 归属校验 ---------------- */

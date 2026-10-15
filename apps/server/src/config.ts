@@ -234,6 +234,24 @@ export const config = {
   },
 
   /**
+   * 支付（审计 F6 / 十一）。
+   *
+   * 配置了 PROVIDER_KEY 才算「已接入支付」；未接入时订阅走模拟开通，
+   * 但仍受消费限额约束（见 services/billing.ts），这样上线接支付时逻辑不用改。
+   */
+  payment: {
+    get provider(): string {
+      return str('PAYMENT_PROVIDER');
+    },
+    get merchantId(): string {
+      return str('PAYMENT_MERCHANT_ID');
+    },
+    get providerKey(): string {
+      return str('PAYMENT_API_KEY');
+    },
+  },
+
+  /**
    * 认证（审计 B2）。
    *
    * SESSION_SECRET 未配置时：开发环境自动生成（重启后旧 token 失效，可接受），

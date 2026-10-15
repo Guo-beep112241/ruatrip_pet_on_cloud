@@ -188,10 +188,17 @@ export class DailyQuota {
   }
 }
 
-/** 每日额度默认值：免费档的硬闸门，防止单个账号刷爆成本 */
+/**
+ * 每日额度默认值：防止单个账号刷爆付费接口的成本。
+ *
+ * petCreate 设 6 而不是 2：3D 生成确实贵，但**真正的约束是宠物位配额**
+ * （免费 1 / Plus 3 / Pro 6，见 services/billing.ts）。
+ * 设成 2 会拦在宠物位之前，让用户看到「今天次数用完」而不是
+ * 「需要订阅」——后者才是他该知道的原因。这里只防异常刷量。
+ */
 export const DEFAULT_DAILY_LIMITS: Record<string, number> = {
   chat: 100,
-  petCreate: 2,
+  petCreate: 6,
   checkin: 20,
   tts: 200,
   capsule: 3,

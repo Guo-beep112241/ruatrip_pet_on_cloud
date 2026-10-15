@@ -267,6 +267,54 @@ test('B2: 注销账号需要确认串与密码，并清空数据', async () => {
   assert.equal(reRegister.status, 200);
 });
 
+test('F6: 宠物位配额生效（免费档只能 1 只）', async () => {
+  const token = await register('slots@example.com', '配额测试');
+  await call('POST', '/api/survey', token, { answers: { species: ['corgi'] } });
+
+  const first = await call('POST', '/api/pet', token, { name: '第一只' });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+
+  const second = await call('POST', '/api/pet', token, { name: '第二只' });
+  assert.equal(second.status, 403, '免费档第 2 只必须被拒');
+  assert.equal(second.body.error.code, 'PET_SLOT_LIMIT');
+  assert.match(second.body.error.detail ?? '', /Plus/, '应告诉用户怎么解决（订阅）');
+});
+
+test('F6: 消费限额对订阅生效，且降级受宠物数约束', async () => {
+  const token = await register('spend@example.com', '限额测试');
+  await call('POST', '/api/survey', token, { answers: { species: ['ragdoll'] } });
+
+  // 默认开启未成年人保护：单笔 398 的年度 Pro 必须被拒
+  const tooBig = await call('POST', '/api/subscribe', token, { tier: 'pro', cycle: 'yearly' });
+  assert.equal(tooBig.status, 403);
+  assert.equal(tooBig.body.error.code, 'MINOR_SINGLE_PURCHASE_LIMIT');
+
+  // 单笔 25 的 Plus 月付允许（模拟开通）
+  const ok = await call('POST', '/api/subscribe', token, { tier: 'plus', cycle: 'monthly' });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.data.simulated, true, '未接支付时必须明确标注模拟');
+  assert.equal(ok.body.data.user.tier, 'plus');
+
+  // 建 2 只（Plus 允许 3 只），然后尝试降到 free 应被拒
+  await call('POST', '/api/pet', token, { name: '甲' });
+  await call('POST', '/api/pet', token, { name: '乙' });
+  const downgrade = await call('POST', '/api/subscribe', token, { tier: 'free', cycle: 'monthly' });
+  assert.equal(downgrade.status, 409);
+  assert.equal(downgrade.body.error.code, 'TIER_DOWNGRADE_BLOCKED');
+});
+
+test('F6: profile 暴露计费状态，且生效限额与校验一致', async () => {
+  const token = await register('billing@example.com', '计费展示');
+  const res = await call('GET', '/api/profile', token);
+  const billing = res.body.data.billing;
+
+  assert.equal(billing.minorGuardEnabled, true);
+  assert.equal(billing.effectiveLimit, 200, '未超硬上限时等于用户设置值');
+  assert.equal(billing.singlePurchaseCap, 50, '未成年人有单笔上限');
+  assert.equal(billing.paymentConfigured, false, '未接支付');
+  assert.ok(res.body.data.planLimits.petSlots.free === 1);
+});
+
 test('B2: /api/auth/status 不泄漏账号信息，只给必要布尔量', async () => {
   const res = await call('GET', '/api/auth/status');
   assert.equal(res.status, 200);
