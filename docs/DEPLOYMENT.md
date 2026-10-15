@@ -118,25 +118,40 @@ docker run -d --name ruatrip \
 
 ## 3. 上线前必须解决的技术问题
 
-### 3.1 🔴 数据会丢（最严重）
+### 3.1 ✅ 数据持久化（已实现，选择驱动即可）
 
-现在数据存在 `apps/server/src/db/store.ts` 写的单个 JSON 文件里。云平台的容器是**临时的**：
+数据层已经是**可插拔驱动**，按环境变量自动选择：
 
-| 平台 | 后果 |
-| --- | --- |
-| Render 免费实例 | 每次重新部署 → 数据全丢 |
-| Render 付费 + 挂载磁盘 | 可以持久（`render.yaml` 里已配好 disk） |
-| Vercel / Netlify Functions | **完全不可用**，函数无状态且文件系统只读 |
-| 国内云服务器 + Docker 挂卷 | ✅ 可以持久（路线 A 的命令里已带 `-v`） |
+| 驱动 | 何时启用 | 适用场景 | 数据会丢吗 |
+| --- | --- | --- | --- |
+| **SQLite** | 默认（Node 22.5+ 内置，零依赖） | 单机部署、国内云服务器 | ❌ 不会 |
+| **Postgres** | 配了 `DATABASE_URL=postgres://...` 且装了 `pg` | 多实例部署、Serverless | ❌ 不会 |
+| JSON 文件 | `STORAGE_DRIVER=file` 或 Node < 22.5 | 本地开发 | ⚠️ 容器重建会丢 |
 
-**真正该做的**：把 `apps/server/src/repositories/index.ts` 的 22 个方法改为读写数据库。这是唯一需要改动的文件，上层 service 和路由都不用动。
+```bash
+# 单机部署：什么都不用配，默认就是 SQLite
+#   数据落在 .data/ruatrip.db，重启/重新部署都在
 
-推荐方案（都有免费额度）：
+# 多实例或想用托管数据库（推荐 Neon / Supabase，都有免费额度）
+npm i pg
+DATABASE_URL=postgres://user:pass@host:5432/ruatrip
+STORAGE_DRIVER=auto   # 看到 postgres:// 会自动切
 
-- **Neon**（Serverless Postgres）— 免费 0.5GB，国内可连
-- **Supabase**（Postgres）— 免费 500MB，自带管理后台
-- **Turso**（SQLite 边缘）— 免费 9GB，适合这个数据量
-- **腾讯云 / 阿里云 MySQL** — 如果你走路线 A，同机房内网连接最快
+# 本地开发想用纯 JSON 文件（便于直接看内容）
+STORAGE_DRIVER=file
+```
+
+**为什么 Render 免费实例现在也不丢数据了**：默认驱动是 SQLite，
+但它写在容器文件系统上，**容器重建时依然会丢**。
+所以 Render 上要么升级到带磁盘的实例（`render.yaml` 已配好挂载），
+要么改用 Postgres。这一条在 `render.yaml` 的注释里也标注了。
+
+**架构取舍（重要，避免误判）**：当前是「进程内全量快照 + 增量落盘」，
+不是「每次查询打数据库」。单用户数据量很小（实测 KB 级），读内存延迟最低。
+但内存占用随用户数线性增长，预估 200KB/用户 → 1000 用户约 200MB 仍可接受；
+**上万用户必须改为按用户分片查询**，那是一次仓储层重写（只需改
+`apps/server/src/repositories/index.ts` 的 22 个方法，业务层不动）。
+**多实例部署时也必须同时做这个改造**，因为各实例的内存缓存互不可见。
 
 ### 3.2 🔴 用户上传的照片会撑爆数据
 

@@ -1,15 +1,29 @@
 /**
- * 轻量 JSON 存储层。
+ * 内存快照 + 可插拔持久化（审计 B1、B4）。
  *
- * 设计说明：这是「数据层」的默认实现，目的是让项目零依赖即可完整运行。
- * 说明书第十章的数据层要求（宠物资产元数据 / 互动日志 / 记忆库 / 行为埋点）
- * 都在 Store 里有对应集合。生产环境把这一层替换为 Postgres/Supabase 即可，
- * 上层 repository 与 service 的调用签名保持不变（见 docs/ARCHITECTURE.md）。
+ * 设计取舍（明确写在这里，避免后来者误判）：
+ *
+ *   本项目选择「进程内全量快照 + 增量落盘」而不是「每次查询都打数据库」。
+ *   理由：单个用户的数据量很小（实测 17 个集合、十几条记录、KB 级），
+ *   读走内存延迟最低，业务代码也不用处理异步与连接池。
+ *
+ *   代价与边界：
+ *     - 内存占用随用户数线性增长。按每用户 5 只宠物、每只 200 条互动估算约
+ *       200KB/用户 → 1000 用户约 200MB，单机仍可接受；上万用户必须改为
+ *       「按用户分片查询」，那是一次真正的仓储层重写
+ *       （只需改 repositories/index.ts 的 22 个方法，见 docs/ARCHITECTURE.md）。
+ *     - 多实例部署时各实例内存不一致，因此多实例必须同时换成按需查询的仓储实现。
+ *
+ *   落盘策略：
+ *     1. **增量**：只写变化的记录（diff 快照），不再整文件重写
+ *     2. **防抖**：合并短时间内的多次变更（默认 250ms）
+ *     3. **异步 + 原子**：不阻塞事件循环，失败不让进程崩溃
+ *     4. **串行**：上一批没写完就排队，避免并发覆盖
  */
-import { mkdirSync, existsSync, readFileSync, renameSync } from 'node:fs';
-import { writeFile, rename } from 'node:fs/promises';
-import { writeFileSync as writeFileSyncCompat } from 'node:fs';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { diffSnapshot, type PersistBatch, type PersistenceDriver } from './driver.ts';
+import { FileDriver } from './drivers.ts';
 import type {
   AffectionLogEntry,
   Badge,
@@ -48,7 +62,7 @@ export interface StoreSchema {
   meta: Record<string, string | number | boolean>;
 }
 
-const emptyStore = (): StoreSchema => ({
+export const emptyStore = (): StoreSchema => ({
   version: 1,
   user: null,
   surveyAnswers: null,
@@ -68,28 +82,20 @@ const emptyStore = (): StoreSchema => ({
   meta: {},
 });
 
-/**
- * 写入策略（审计 B4 修复）。
- *
- * 旧实现每次变更都 `writeFileSync` 全量落盘：JSON 涨到几十 MB 后，
- * 每一次互动都会同步阻塞事件循环，表现为整个服务变慢甚至卡死。
- *
- * 现在改为：
- *   1. **防抖**：合并短时间内的多次变更，只落盘一次（默认 250ms）
- *   2. **异步**：用 fs/promises，不阻塞事件循环
- *   3. **原子**：先写 .tmp 再 rename，进程被杀也不会留下半个文件
- *   4. **串行**：写入排队，避免并发 rename 互相覆盖
- *   5. **兜底**：flushSync() 供退出流程与测试使用
- */
 export interface StoreOptions {
-  /** 防抖窗口（毫秒）；设 0 表示每次变更立即异步落盘 */
+  /** 防抖窗口（毫秒）；0 表示每次变更立即异步落盘 */
   debounceMs?: number;
-  /** 是否在控制台打印慢写入告警 */
+  /** 超过这个耗时就打印慢写入告警 */
   warnSlowMs?: number;
+  /** 持久化驱动；不传则用文件驱动（向后兼容） */
+  driver?: PersistenceDriver;
 }
 
 export class Store {
   private data: StoreSchema = emptyStore();
+  /** 已确认落盘的快照，用于计算增量 */
+  private persisted: Record<string, unknown> = {};
+  private readonly driver: PersistenceDriver;
   private readonly file: string;
   private readonly dir: string;
   private readonly debounceMs: number;
@@ -99,67 +105,88 @@ export class Store {
   private writing: Promise<void> | null = null;
   private pendingWrite = false;
   private lastWriteError: Error | null = null;
+  private loaded = false;
 
   constructor(dir: string, options: StoreOptions = {}) {
     this.dir = dir;
     this.debounceMs = options.debounceMs ?? 250;
     this.warnSlowMs = options.warnSlowMs ?? 400;
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     this.file = join(dir, 'ruatrip.json');
-    this.load();
+    this.driver = options.driver ?? new FileDriver(dir);
+
+    // 文件驱动在构造期同步加载，保持既有调用点不变；
+    // 其它驱动（sqlite/postgres）是异步 IO，由服务启动时 await store.init()
+    if (this.driver.kind === 'file') this.loadSync();
   }
 
-  private load(): void {
+  /* ---------------- 加载 ---------------- */
+
+  private loadSync(): void {
     if (!existsSync(this.file)) {
       this.data = emptyStore();
-      this.flushSync();
+      this.writeFullSync();
+      this.persisted = toPlain(this.data);
+      this.loaded = true;
       return;
     }
     try {
       const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<StoreSchema>;
-      this.data = { ...emptyStore(), ...parsed };
+      this.data = mergeSchema(parsed);
     } catch {
-      // 数据损坏时保留坏档，重建空档，避免整个服务起不来
+      // 坏档留档，服务照常起来
       renameSync(this.file, `${this.file}.corrupt-${Date.now()}`);
       this.data = emptyStore();
-      this.flushSync();
+      this.writeFullSync();
     }
+    this.persisted = toPlain(this.data);
+    this.loaded = true;
   }
+
+  /** 异步加载：任意驱动可用；服务启动时调用一次 */
+  async init(): Promise<void> {
+    if (this.loaded) return;
+    const snapshot = await this.driver.load();
+    this.data = mergeSchema(snapshot as Partial<StoreSchema>);
+    this.persisted = toPlain(this.data);
+    this.loaded = true;
+  }
+
+  private writeFullSync(): void {
+    if (!existsSync(this.dir)) return;
+    const tmp = `${this.file}.tmp`;
+    writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8');
+    renameSync(tmp, this.file);
+  }
+
+  /* ---------------- 读写 ---------------- */
 
   read(): StoreSchema {
     return this.data;
   }
 
-  /** 变更数据并安排一次落盘（防抖 + 异步） */
+  /** 变更数据并安排一次落盘 */
   update<T>(mutator: (data: StoreSchema) => T): T {
     const result = mutator(this.data);
     this.schedule();
     return result;
   }
 
-  /** 预约落盘：合并短时间内的多次变更 */
   private schedule(): void {
     if (this.debounceMs <= 0) {
-      void this.flush();
+      void this.flush().catch(() => undefined);
       return;
     }
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
       // 必须在这里 catch：否则失败会变成 unhandledRejection，
-      // 在 Node 里默认直接终止进程（例如容器关闭时数据目录被移除）。
-      // 错误本身已记录在 lastWriteError，由 /api/health 暴露。
+      // Node 默认直接终止进程（容器关闭时数据目录消失正好走这条路径）。
       void this.flush().catch(() => undefined);
     }, this.debounceMs);
-    // 不阻止进程退出：即使定时器还没触发，SIGTERM 处理里会 flushSync 兜底
     this.timer.unref?.();
   }
 
-  /**
-   * 异步原子落盘。
-   * 写入串行执行：如果上一次还没写完，就把本次标记为 pending，
-   * 等上一次结束后再写，避免两个 rename 互相覆盖。
-   */
+  /** 计算增量并落盘；写入串行执行，避免并发覆盖 */
   async flush(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -174,31 +201,26 @@ export class Store {
       this.writing = null;
     });
     await this.writing;
-    // 写入期间又有变更 → 再写一次
     if (this.pendingWrite) await this.flush();
   }
 
   private async writeOnce(): Promise<void> {
     const started = Date.now();
-    const tmp = `${this.file}.tmp`;
-    // 先在内存里序列化，避免 await 期间数据被并发修改导致快照不一致
-    const payload = JSON.stringify(this.data, null, 2);
+    const current = toPlain(this.data);
+    const batch: PersistBatch = diffSnapshot(this.persisted, current);
+    if (isBatchEmpty(batch)) return;
+
     try {
-      await writeFile(tmp, payload, 'utf8');
-      await rename(tmp, this.file);
+      await this.driver.persist(batch);
+      this.persisted = current;
       this.lastWriteError = null;
       const cost = Date.now() - started;
       if (cost > this.warnSlowMs) {
-        console.warn(
-          `[ruatrip:store] 落盘耗时 ${cost}ms（数据 ${(payload.length / 1024).toFixed(0)}KB）。` +
-            '数据量继续增长时建议迁移到数据库，见 docs/API-INTEGRATION.md 第 11 节。',
-        );
+        console.warn(`[ruatrip:store] 落盘耗时 ${cost}ms（驱动 ${this.driver.kind}）`);
       }
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
       this.lastWriteError = err;
-      // 数据目录被移除（容器正在关闭、测试清理了临时目录）不算致命：
-      // 记录状态即可，不要打断进程，更不要变成未处理的 rejection。
       if (err.code === 'ENOENT' && !existsSync(this.dir)) {
         console.warn('[ruatrip:store] 数据目录已不存在，跳过本次落盘');
         return;
@@ -208,21 +230,21 @@ export class Store {
     }
   }
 
-  /** 同步落盘：仅供构造期、测试与退出流程使用 */
+  /** 同步落盘：仅供退出流程与测试使用（仅文件驱动支持） */
   flushSync(): void {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    const tmp = `${this.file}.tmp`;
-    writeFileSyncCompat(tmp, JSON.stringify(this.data, null, 2), 'utf8');
-    renameSync(tmp, this.file);
+    if (this.driver.kind !== 'file') {
+      console.warn('[ruatrip:store] flushSync 仅支持文件驱动，请改用 await flush() / drain()');
+      return;
+    }
+    this.writeFullSync();
+    this.persisted = toPlain(this.data);
   }
 
-  /**
-   * 停止接受新的落盘并等待在途写入完成。
-   * 测试清理临时目录、以及进程退出前都该调用它。
-   */
+  /** 停止接受新的落盘并等待在途写入完成 */
   async destroy(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -238,21 +260,34 @@ export class Store {
     else if (this.writing) await this.writing;
   }
 
-  /** 最近一次落盘错误，供 /api/health 探测 */
+  /** 落盘并关闭驱动连接（优雅退出的最后一步） */
+  async close(): Promise<void> {
+    await this.drain();
+    await this.driver.close();
+  }
+
+  /* ---------------- 观测 ---------------- */
+
   get writeError(): Error | null {
     return this.lastWriteError;
   }
 
-  /** 数据文件大小（字节），供健康检查与运维观测 */
-  sizeBytes(): number {
-    try {
-      return existsSync(this.file) ? readFileSync(this.file).length : 0;
-    } catch {
-      return 0;
-    }
+  get driverKind(): PersistenceDriver['kind'] {
+    return this.driver.kind;
   }
 
-  /** 待写状态（有定时器或正在写） */
+  /** 数据规模：文件驱动返回文件大小，其它驱动返回内存快照字节数 */
+  sizeBytes(): number {
+    if (this.driver.kind === 'file' && existsSync(this.file)) {
+      try {
+        return readFileSync(this.file).length;
+      } catch {
+        /* 退化为内存估算 */
+      }
+    }
+    return Buffer.byteLength(JSON.stringify(this.data));
+  }
+
   isDirty(): boolean {
     return this.timer !== null || this.writing !== null;
   }
@@ -263,9 +298,93 @@ export class Store {
   }
 }
 
+/**
+ * 转成可 diff 的普通对象。
+ * 用显式断言而不是泛型 clone：StoreSchema 没有索引签名，
+ * 而 diffSnapshot 需要按集合名访问字段。
+ */
+/**
+ * 把加载到的快照合并到空档上。
+ *
+ * 为什么不直接用 `{...empty, ...loaded}`：
+ * 驱动在「该字段还没有数据」时会返回 null（例如 SQLite 的单例表为空），
+ * 展开运算会把这个 null 覆盖到默认值上，导致 `meta` 变成 null 而崩在 getMeta。
+ * 这里显式处理每一种字段的形态，坏值一律回落默认。
+ */
+function mergeSchema(loaded: Partial<StoreSchema>): StoreSchema {
+  const base = emptyStore();
+  const result: StoreSchema = { ...base };
+
+  result.version = typeof loaded.version === 'number' ? loaded.version : base.version;
+
+  for (const key of SINGLETON_OBJECT_KEYS) {
+    const value = loaded[key];
+    // user / surveyAnswers 允许为 null（表示尚未创建），但必须是对象或 null
+    result[key] = value && typeof value === 'object' ? (value as never) : null;
+  }
+  const meta = loaded.meta;
+  result.meta = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+
+  for (const key of ARRAY_KEYS) {
+    const value = loaded[key];
+    result[key] = Array.isArray(value) ? (value as never) : [];
+  }
+  return result;
+}
+
+const SINGLETON_OBJECT_KEYS = ['user', 'surveyAnswers'] as const;
+
+const ARRAY_KEYS = [
+  'pets',
+  'generationJobs',
+  'interactions',
+  'conversations',
+  'messages',
+  'memories',
+  'checkins',
+  'wishlist',
+  'badges',
+  'journals',
+  'postcards',
+  'capsules',
+  'fosters',
+] as const;
+
+function toPlain(schema: StoreSchema): Record<string, unknown> {
+  try {
+    return structuredClone(schema) as unknown as Record<string, unknown>;
+  } catch {
+    return JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
+  }
+}
+
+function isBatchEmpty(batch: PersistBatch): boolean {
+  return (
+    Object.keys(batch.singletons).length === 0 &&
+    Object.values(batch.upserts).every((rows) => rows.length === 0) &&
+    Object.values(batch.deletes).every((ids) => ids.length === 0)
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 单例工厂                                                            */
+/* ------------------------------------------------------------------ */
+
 let store: Store | null = null;
 
-export function getStore(dir: string): Store {
-  if (!store) store = new Store(dir);
+/**
+ * 取全局 Store。
+ *
+ * 注意：sqlite/postgres 驱动需要先 await init() 才能读到数据，
+ * 所以服务启动流程是：
+ *   const store = getStore(dir, { driver }); await store.init();
+ */
+export function getStore(dir: string, options: StoreOptions = {}): Store {
+  if (!store) store = new Store(dir, options);
   return store;
+}
+
+/** 仅供测试重置单例 */
+export function __resetStoreForTests(): void {
+  store = null;
 }

@@ -234,6 +234,43 @@ export const config = {
   },
 
   /**
+   * 持久化（审计 B1）。
+   *
+   * driver=auto 时的判定顺序：
+   *   DATABASE_URL 是 postgres:// → Postgres
+   *   DATABASE_URL 是 file:      → SQLite（用其路径）
+   *   都没有                      → SQLite（默认，Node 22.5+ 内置）
+   *   Node < 22.5                 → 回落 JSON 文件
+   */
+  persistence: {
+    get driver(): 'auto' | 'file' | 'sqlite' | 'postgres' {
+      const raw = str('STORAGE_DRIVER', 'auto').toLowerCase();
+      return (['auto', 'file', 'sqlite', 'postgres'].includes(raw) ? raw : 'auto') as
+        | 'auto'
+        | 'file'
+        | 'sqlite'
+        | 'postgres';
+    },
+    get databaseUrl(): string {
+      return str('DATABASE_URL');
+    },
+    /** SQLite 文件路径；DATABASE_URL=file:xxx 时也认 */
+    get sqliteFile(): string {
+      const url = this.databaseUrl;
+      if (url.startsWith('file:')) {
+        const p = url.slice(5);
+        return p.startsWith('/') ? p : resolve(REPO_ROOT, p);
+      }
+      return resolve(REPO_ROOT, str('SQLITE_FILE', './.data/ruatrip.db'));
+    },
+    get pgSsl(): boolean {
+      const raw = str('PG_SSL');
+      if (raw === '') return true;
+      return raw === 'true' || raw === '1';
+    },
+  },
+
+  /**
    * 对象存储（审计 B3）。
    *
    * 四个 S3 必填项齐全时自动使用 S3 兼容驱动，否则回落到本地磁盘。

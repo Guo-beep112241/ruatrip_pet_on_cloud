@@ -318,12 +318,46 @@ Authorization: Bearer <IMAGE_COMPOSER_API_KEY>
 
 ---
 
-## 11. 数据层替换（可选但推荐）
+## 11. 数据持久化（已实现，选驱动即可）
 
-当前数据存在 `apps/server/src/db/store.ts`（原子写入的 JSON 文件），全部读写集中在 `apps/server/src/repositories/index.ts`。
-替换为 Postgres / Supabase 时**只需重写 repositories 的 22 个方法**，services 与 routes 完全不用动。表结构对应 `StoreSchema` 的 15 个集合。
+数据层是可插拔的，**不需要改代码**，换驱动只改环境变量。
 
----
+| 驱动 | 启用条件 | 说明 |
+| --- | --- | --- |
+| `sqlite` | 默认（Node 22.5+） | Node 内置 `node:sqlite`，零依赖。数据落在 `.data/ruatrip.db`，WAL 模式 |
+| `postgres` | `DATABASE_URL=postgres://...` 且已 `npm i pg` | 多实例部署的唯一正确选择。表结构为 `id TEXT PRIMARY KEY, data JSONB` |
+| `file` | `STORAGE_DRIVER=file` 或 Node < 22.5 | JSON 文件，便于本地直接查看内容 |
+
+```bash
+# 强制指定
+STORAGE_DRIVER=sqlite          # 或 postgres / file / auto（默认）
+
+# Postgres（Neon / Supabase / 自建 / RDS 都行）
+npm i pg
+DATABASE_URL=postgres://user:pass@host:5432/ruatrip?sslmode=require
+PG_SSL=true
+
+# SQLite 自定义路径
+SQLITE_FILE=./.data/ruatrip.db
+# 或走连接串形式
+DATABASE_URL=file:./data/ruatrip.db
+```
+
+**表结构**（由驱动自动建表，无需手工迁移）：
+
+```sql
+CREATE TABLE "pets" (id TEXT PRIMARY KEY, data JSONB NOT NULL);
+-- 每个业务集合一张表；另有 singleton_user / singleton_meta / singleton_surveyAnswers
+```
+
+**写入是增量的**：Store 维护内存快照，落盘时用 `diffSnapshot()` 只写变化的记录
+（新增/更新 → upsert，删除 → DELETE），并用事务包裹。不再整表/整文件重写。
+
+**如果要换成「每次查询打数据库」**：
+只需重写 `apps/server/src/repositories/index.ts` 的 22 个方法，
+services 与 routes 完全不用动。什么时候必须做这个改造：
+- 用户数上万（内存快照会撑不住）
+- 多实例部署（各实例缓存互不可见）
 
 ## 12. 接入后的自检清单
 

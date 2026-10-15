@@ -9,6 +9,7 @@
 import { createServer } from 'node:http';
 import { config } from './config.ts';
 import { getStore } from './db/store.ts';
+import { createPersistenceDriver } from './db/drivers.ts';
 import { Repositories } from './repositories/index.ts';
 import { readJsonBody, readRawBody, Router, sendError, sendJson, type Ctx } from './http/router.ts';
 import { serveStatic, webDistAvailable } from './http/static.ts';
@@ -54,7 +55,22 @@ import { generateJournal, generatePostcard } from './services/content.ts';
 import { renderPetSvg, safePalette, safeSpecies } from './services/petArt.ts';
 import { activeTtsProvider, VOICE_PRESETS } from './services/adapters-bridge.ts';
 
-const store = getStore(config.dataDir);
+/**
+ * 持久化驱动选择（审计 B1）。
+ *
+ * 默认用 SQLite（Node 22.5+ 内置，零依赖、真持久化），
+ * 配了 DATABASE_URL=postgres:// 就切 Postgres（多实例部署的唯一正确选择），
+ * STORAGE_DRIVER=file 才会退回原来的 JSON 文件。
+ */
+const persistenceChoice = createPersistenceDriver({
+  dataDir: config.dataDir,
+  driver: config.persistence.driver,
+  databaseUrl: config.persistence.databaseUrl,
+  sqliteFile: config.persistence.sqliteFile,
+  pgSsl: config.persistence.pgSsl,
+});
+
+const store = getStore(config.dataDir, { driver: persistenceChoice.driver });
 const repos = new Repositories(store);
 
 /** 对象存储：四个 S3 变量齐全就用 S3，否则本地磁盘（审计 B3） */
@@ -923,6 +939,14 @@ function humanizeError(code: string): string {
   return map[code] ?? code;
 }
 
+/**
+ * 启动前置：异步加载持久化数据。
+ *
+ * 文件驱动在构造期已同步加载，这一步是幂等的；
+ * sqlite/postgres 必须等这一步完成才能接受请求，否则会读到空档。
+ */
+await store.init();
+
 server.listen(config.port, () => {
   if (webDistAvailable()) console.log('     已托管前端构建产物：apps/web/dist');
   else console.log('     未发现前端构建产物（跑 npm run build 后可由本服务同源托管）');
@@ -932,6 +956,10 @@ server.listen(config.port, () => {
   console.log('  🐾 RuaTrip（Rua途）v2.0 服务端已启动');
   console.log(`     http://localhost:${config.port}`);
   console.log(`     数据目录：${config.dataDir}`);
+  console.log(`     持久化：${persistenceChoice.description}`);
+  if (persistenceChoice.productionWarning) {
+    console.log(`     ⚠️  ${persistenceChoice.productionWarning}`);
+  }
   console.log(`     接入模式：${report.mode}（真实通道 ${live.length} 个）`);
   if (!live.length) {
     console.log('     提示：当前全部为 Mock 模式，功能完整。需要接入真实能力见 docs/API-INTEGRATION.md');
