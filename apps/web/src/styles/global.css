@@ -1,0 +1,129 @@
+@import './tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-surface-base text-text-primary font-zh antialiased;
+    /* 细微纸张纹理：用极低透明度的噪点，避免纯色平板感 */
+    background-image:
+      radial-gradient(circle at 18% 12%, hsl(30 60% 92% / 0.55), transparent 42%),
+      radial-gradient(circle at 82% 78%, hsl(20 45% 90% / 0.5), transparent 46%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+    background-attachment: fixed;
+    min-height: 100dvh;
+  }
+
+  /* 移动端安全区 */
+  :root {
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-top: env(safe-area-inset-top, 0px);
+  }
+
+  ::selection {
+    background: hsl(var(--color-brand-primary) / 0.28);
+  }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--color-brand-primary) / 0.7);
+    outline-offset: 2px;
+  }
+
+  /* 隐藏滚动条但保留滚动能力（横滑徽章墙、时间轴卡片） */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@layer components {
+  /* ---- 4.1 悬浮交互卡片 (Floating Pet Card) ---- */
+  .rt-card {
+    @apply bg-surface-raised/90 rounded-card border border-border-subtle/40 shadow-plush backdrop-blur-md;
+  }
+  .rt-card-hover {
+    @apply transition-all duration-500 ease-spring hover:-translate-y-1 hover:shadow-plush-hover;
+  }
+  .rt-card-active {
+    @apply active:scale-[0.98] active:shadow-md transition-transform duration-200;
+  }
+
+  /* ---- 4.2 核心抚摸按钮 (Primary "Rua" Button) ---- */
+  .rt-button {
+    @apply inline-flex items-center justify-center gap-2 rounded-pill bg-brand-primary px-comfortable py-snug
+      text-body font-bold text-text-inverse shadow-md transition-all duration-300 ease-spring
+      hover:-translate-y-0.5 hover:brightness-105 hover:shadow-lg
+      active:scale-[0.94] active:shadow-sm
+      disabled:cursor-not-allowed disabled:opacity-50 disabled:grayscale-[30%] disabled:hover:translate-y-0;
+  }
+  .rt-button-quiet {
+    @apply inline-flex items-center justify-center gap-2 rounded-pill border border-border-subtle/70 bg-surface-raised
+      px-comfortable py-snug text-body-sm font-medium text-text-secondary transition-all duration-300 ease-spring
+      hover:-translate-y-0.5 hover:shadow-plush active:scale-[0.95] disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  /* ---- 4.4 状态输入框 (Journal Input) ---- */
+  .rt-input {
+    @apply w-full rounded-xl border border-transparent bg-surface-sunken px-base py-snug text-body-sm
+      text-text-primary placeholder:text-text-muted transition-all duration-300
+      focus:bg-surface-raised focus:shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-primary/40;
+  }
+
+  /* ---- 徽章 / 标签 ---- */
+  .rt-chip {
+    @apply inline-flex items-center gap-1 rounded-pill bg-surface-sunken px-snug py-1 text-caption font-medium text-text-secondary;
+  }
+  .rt-chip-active {
+    @apply bg-brand-secondary text-text-inverse;
+  }
+
+  /* ---- 分区标题 ---- */
+  .rt-section-title {
+    @apply text-title font-bold tracking-tight text-text-primary;
+  }
+  .rt-label {
+    @apply text-caption font-semibold uppercase tracking-[0.14em] text-text-muted;
+  }
+
+  /* ---- 情绪层次：三个空间的明暗递进（说明书 九） ---- */
+  .rt-space-cabin { filter: brightness(1) saturate(1); }
+  .rt-space-hut { filter: brightness(0.965) saturate(0.94); }
+  .rt-space-capsule { filter: brightness(0.92) saturate(0.8); }
+
+  /* ---- 骨架屏 ---- */
+  .rt-skeleton {
+    @apply rounded-card bg-surface-sunken;
+    background-image: linear-gradient(90deg, transparent, hsl(38 42% 99% / 0.75), transparent);
+    background-size: 200% 100%;
+    @apply animate-shimmer;
+  }
+}
+
+@layer utilities {
+  .rt-safe-bottom {
+    padding-bottom: calc(var(--safe-bottom) + 0.5rem);
+  }
+  .rt-tap-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  /* 毛绒软阴影的悬浮光晕（宠物展示区专用） */
+  .rt-glow {
+    box-shadow:
+      0 30px 70px -30px hsl(24 40% 30% / 0.3),
+      0 0 0 1px hsl(var(--color-border-subtle) / 0.5) inset;
+  }
+  .rt-text-shadow-warm {
+    text-shadow: 0 1px 0 hsl(38 42% 99% / 0.6);
+  }
+}
