@@ -13,9 +13,12 @@ import { config } from '../config.ts';
 import { VOICE_PRESETS } from '../services/adapters-bridge.ts';
 import { nowIso } from '../services/growth.ts';
 import { renderPetSvg, safePalette, safeSpecies } from '../services/petArt.ts';
+import { createLogger, sanitizeClientReport } from '../http/logger.ts';
 import { check, SCHEMAS } from './schemas.ts';
 import type { Router } from '../http/router.ts';
 import type { RouteServices } from './services.ts';
+
+const log = createLogger(process.env.NODE_ENV === 'production' ? 'production' : 'development');
 
 export function registerCatalogRoutes(router: Router, svc: RouteServices): void {
   const {
@@ -37,6 +40,29 @@ export function registerCatalogRoutes(router: Router, svc: RouteServices): void 
     store,
     touchCounters,
   } = svc;
+  /**
+   * 前端错误上报（审计 O3）。
+   *
+   * 不需要登录：登录页崩了也要能上报。
+   * 因此它是「可被匿名写入」的接口，安全上做了三件事：
+   *   1. 走 api:write 限流桶
+   *   2. 字段全部限长（见 sanitizeClientReport）
+   *   3. 不写入用户数据，只打结构化日志
+   */
+  router.post('/api/client-error', (ctx) => {
+    const report = sanitizeClientReport(ctx.body);
+    if (!report) {
+      throw Object.assign(new Error('VALIDATION_FAILED'), { status: 400, detail: '上报内容不合法' });
+    }
+    log.warn('前端上报错误', {
+      errorMessage: report.errorMessage,
+      trail: report.trail,
+      url: report.url,
+      ua: report.userAgent,
+    });
+    return { ok: true, data: { received: true } };
+  });
+
 /* -------- 引导与基础数据 -------- */
 /**
  * 健康检查（审计 M5）。

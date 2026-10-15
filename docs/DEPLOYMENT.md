@@ -256,3 +256,91 @@ curl -s https://你的地址/ | head -5                               # 看前�
 
 **我的建议**：如果你只是想给几十个朋友看，走**路线 B** 就行，但一定要先把数据和图片从 JSON 里搬出去（3.1、3.2）。
 如果你打算认真做、甚至以后让别人付费订阅，直接走**路线 A**——一年不到一百块，换来的是「打开就秒开」这个最基本的体验，比你花时间优化代码划算得多。
+
+
+---
+
+## 8. 备份、监控与日志（审计 O4 / O3）
+
+### 8.1 备份
+
+**没有备份的持久化等于没有持久化。** SQLite 文件损坏、误删账号、迁移失败都会造成不可逆的数据丢失。
+
+```bash
+# SQLite / JSON 文件驱动
+node scripts/backup.mjs                       # 备份到 ./backups/
+node scripts/backup.mjs --out /var/backups --keep 14
+
+# Postgres
+pg_dump "$DATABASE_URL" | gzip > backup-$(date +%F).sql.gz
+```
+
+脚本做了三件事：
+1. SQLite 先执行 `PRAGMA wal_checkpoint(TRUNCATE)`，把 WAL 合并进主库再复制
+   （不 checkpoint 直接拷 `.db` 会丢掉最近的事务）
+2. 同时备份 `uploads/`（本地存储驱动产生的图片）
+3. 轮转：只保留最近 N 份
+
+放 crontab 里每天一次：
+
+```cron
+0 4 * * * cd /srv/ruatrip && node scripts/backup.mjs --out /var/backups --keep 14 >> /var/log/ruatrip-backup.log 2>&1
+```
+
+**恢复**：
+
+```bash
+systemctl stop ruatrip
+rm -f .data/ruatrip.db .data/ruatrip.db-wal .data/ruatrip.db-shm
+cp /var/backups/ruatrip-<时间戳>/ruatrip.db* .data/
+cp -r /var/backups/ruatrip-<时间戳>/uploads .data/uploads   # 如果有
+systemctl start ruatrip
+curl -s localhost:8787/api/health | grep -o '"status":"[a-z]*"'
+```
+
+### 8.2 健康检查
+
+`GET /api/health` 返回三档语义，可直接接给平台做存活探针：
+
+| status | HTTP | 含义 | 平台应该做什么 |
+| --- | --- | --- | --- |
+| `ok` | 200 | 全部依赖正常 | 保持 |
+| `degraded` | 200 | 核心可用但对象存储异常 | 保持，但看告警 |
+| `error` | 503 | 持久化不可用或最近落盘失败 | 重启 / 摘流量 |
+
+返回内容还包括 `driver`、`uptimeSec`、`dataBytes`（用于发现「图片又被塞进 JSON」这类异常膨胀）。
+
+```yaml
+# Docker healthcheck 示例
+healthcheck:
+  test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/api/health"]
+  interval: 30s
+  timeout: 3s
+  retries: 3
+  start_period: 15s
+```
+
+### 8.3 日志
+
+- **生产环境**输出 JSON Lines（每行一个 JSON），可直接喂给 Render / CloudWatch / Loki
+- **开发环境**输出人类可读格式（免得本地调试被 JSON 淹没）
+- 每个请求带 `requestId`，并通过 `x-request-id` 响应头返回 ——
+  用户报错时让他提供这个 id，就能把前端问题与服务端日志对齐
+- **脱敏**：`password` / `secret` / `token` / `authorization` / `text` / `content` /
+  `message` / `photoUrl` / `image` 等字段（含子串匹配）一律替换为 `[redacted]`，
+  长字符串截断到 200 字符。对话内容与照片不会进日志
+
+```bash
+# 本地调试：只看错误
+NODE_ENV=production npm start 2>&1 | grep '"level":"error"'
+
+# 追一个请求
+grep '<requestId>' server.log
+```
+
+### 8.4 前端错误上报
+
+前端全局捕获 `error` 与 `unhandledrejection`，上报到 `POST /api/client-error`（无需登录，
+因为登录页崩了也要能上报）。该接口是匿名可写的，因此：
+走限流桶、字段全部限长、不写入用户数据只打日志。
+面包屑只记录「在哪个页面做了什么操作」，**不记录用户说了什么**。

@@ -34,6 +34,53 @@ function activateDeferredFonts(): void {
 
 activateDeferredFonts();
 
+/**
+ * 全局错误捕获与上报（审计 O3）。
+ *
+ * 只上报「结构与事件名」，不含用户输入内容与照片：
+ *   面包屑记录的是「用户在哪个页面做了什么」，
+ *   而不是「用户说了什么」——后者属于隐私，不该出现在日志里。
+ */
+const trail: string[] = [];
+export function breadcrumb(event: string): void {
+  trail.push(event);
+  if (trail.length > 20) trail.shift();
+}
+
+function reportClientError(payload: { message: string; stack?: string }): void {
+  // 忽略浏览器扩展注入的噪音错误
+  if (/ResizeObserver loop|Extension context invalidated/i.test(payload.message)) return;
+  try {
+    const token = localStorage.getItem('ruatrip.token');
+    void fetch(`${import.meta.env.VITE_API_BASE_URL ?? '/api'}/client-error`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        errorMessage: payload.message.slice(0, 500),
+        trail,
+        url: window.location.pathname,
+        userAgent: navigator.userAgent,
+        at: Date.now(),
+      }),
+      // 上报失败不能影响用户；keepalive 让页面卸载时也能发出去
+      keepalive: true,
+    }).catch(() => undefined);
+  } catch {
+    /* 静默 */
+  }
+}
+
+window.addEventListener('error', (e) => {
+  reportClientError({ message: e.message || 'unknown error' });
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const reason = e.reason;
+  reportClientError({ message: reason instanceof Error ? reason.message : String(reason) });
+});
+
 const container = document.getElementById('root');
 if (!container) throw new Error('#root not found');
 

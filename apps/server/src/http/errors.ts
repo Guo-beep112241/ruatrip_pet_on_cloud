@@ -16,7 +16,6 @@ const BAD_REQUEST = new Set([
   'ITEM_NOT_FOUND',         // 兑换物不存在
   'OUTFIT_LOCKED',          // 服饰未解锁
   'SCENE_LOCKED',           // 场景未解锁
-  'DESTINATION_NOT_FOUND',  // 目的地不存在
   'WEAK_PASSWORD',          // 密码强度不足
   'INVALID_EMAIL',          // 邮箱格式不对
   'INVALID_JSON',           // 请求体不是合法 JSON
@@ -28,6 +27,8 @@ const BAD_REQUEST = new Set([
   'CONFIRM_REQUIRED',       // 缺少确认串
   'UNKNOWN_PLAN',           // 订阅档位不存在
   'INVALID_IMAGE_REF',      // 图片引用不受信任
+  'VALIDATION_FAILED',      // 请求体校验失败（见 http/validate.ts）
+  'INVALID_BODY',
 ]);
 
 /** 需要登录 */
@@ -56,6 +57,7 @@ const NOT_FOUND = new Set([
   'CAPSULE_NOT_FOUND',
   'CONVERSATION_NOT_FOUND',
   'CHECKIN_NOT_FOUND',
+  'DESTINATION_NOT_FOUND',  // 目的地不存在（同样是资源类）
 ]);
 
 /** 冲突：状态不满足前置条件 */

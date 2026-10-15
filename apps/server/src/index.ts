@@ -14,6 +14,10 @@ import { Repositories } from './repositories/index.ts';
 import { readJsonBody, readRawBody, Router, sendError, sendJson, type Ctx } from './http/router.ts';
 import { serveStatic, webDistAvailable } from './http/static.ts';
 import { KNOWN_ERROR_CODES, statusForErrorCode } from './http/errors.ts';
+import { createLogger, newRequestId, sanitizeClientReport } from './http/logger.ts';
+
+/** 结构化日志（审计 O3）：开发环境易读、生产环境 JSON Lines */
+const log = createLogger(config.env);
 import { API_CSP, applyBaseHeaders, applyCors, contentSecurityPolicy } from './http/security.ts';
 import {
   DEFAULT_DAILY_LIMITS,
@@ -386,6 +390,14 @@ export function createApp() {
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  /**
+   * 请求 id（审计 O3）：把「访问日志 → 业务日志 → 错误日志」串起来。
+   * 响应该头，前端报错时可以带上，便于把用户侧问题与服务端日志对齐。
+   */
+  const requestId = newRequestId();
+  const startedAt = Date.now();
+  res.setHeader('x-request-id', requestId);
+
   // 安全响应头：所有响应都带（审计 S4）
   applyBaseHeaders(res);
   // 严格 CORS：不匹配白名单就不设 ACAO（审计 S2）
@@ -393,6 +405,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (cors.preflightHandled) return;
 
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+  // 记录访问日志（响应结束即写，含耗时与状态码）
+  res.on('finish', () => {
+    const cost = Date.now() - startedAt;
+    const level = res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info';
+    log[level]('http', {
+      requestId,
+      method: req.method,
+      path: url.pathname,
+      status: res.statusCode,
+      ms: cost,
+    });
+  });
   const matched = router.match(req.method ?? 'GET', url.pathname);
 
   if (!matched) {
@@ -474,10 +498,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const status = statusForErrorCode(code, err.status);
 
     if (status >= 500) {
-      console.error('[ruatrip:error]', err);
+      log.error('request failed', {
+        requestId,
+        code,
+        path: url.pathname,
+        method: req.method,
+        stack: err.stack?.split('\n').slice(0, 4).join(' | '),
+      });
     } else if (!KNOWN_ERROR_CODES.has(code)) {
       // 未登记的业务错误码：提示补进映射表，避免悄悄退化成 500
-      console.warn(`[ruatrip:warn] 未登记的错误码 "${code}" 已按 ${status} 处理，建议加入 http/errors.ts`);
+      log.warn('未登记的错误码，已按默认状态处理', { requestId, code, status, hint: '建议加入 http/errors.ts' });
     }
 
     // 参数校验失败：把每个字段的问题都带上，前端可以逐个标红
@@ -606,6 +636,17 @@ if (isMainModule) server.listen(config.port, () => {
   const report = integrationReport();
   const live = report.items.filter((i) => i.configured && !['mock', 'local-svg-composer', 'browser-web-speech', 'universal-skeleton'].includes(i.provider));
   console.log('');
+  log.info('RuaTrip 服务端已启动', {
+    port: config.port,
+    env: config.env,
+    driver: store.driverKind,
+    persistence: persistenceChoice.description,
+    dataDir: config.dataDir,
+    storage: storage.driver,
+    llm: activeLlmProvider().meta.id,
+    authMode: config.authMode,
+    rateLimit: rateLimitDisabled() ? 'disabled' : 'enabled',
+  });
   console.log('  🐾 RuaTrip（Rua途）v2.0 服务端已启动');
   console.log(`     http://localhost:${config.port}`);
   console.log(`     数据目录：${config.dataDir}`);

@@ -4,6 +4,7 @@ import { Baby, Check, Copy, KeyRound, Sparkles, Users } from 'lucide-react';
 import { AppShell } from '../components/AppShell';
 import { Button, Card, Chip, SectionTitle, Sheet } from '../components/ui';
 import { capabilityNotes, detectCapabilities } from '../hooks/useMediaQuery';
+import { useApi } from '../hooks/useApi';
 import { useApp } from '../store/app';
 import { api, auth, withQuery } from '../api/client';
 import { SUBSCRIPTION_PLANS } from '../api/types';
@@ -29,21 +30,27 @@ export function Profile() {
   const [nickname, setNickname] = useState(user?.nickname ?? '');
   const [petName, setPetName] = useState(pet?.name ?? '');
 
-  const loadProfile = async () => {
-    try {
-      const data = await api.get<ProfileResponse & { billing: BillingState; planLimits: PlanLimits }>('/profile');
-      setStats(data.stats);
-      setBilling(data.billing);
-      setPlanLimits(data.planLimits);
-      useApp.setState({ user: data.user, pet: data.pet, integration: data.integration });
-    } catch {
-      /* 静默 */
-    }
-  };
+  /**
+   * 统一数据请求（审计 M7）：三态、卸载安全、竞态处理都由 hook 负责。
+   * 之前这里手写的 loadProfile 在卸载后会 setState，且错误被完全吞掉。
+   */
+  const profile = useApi<ProfileResponse & { billing: BillingState; planLimits: PlanLimits }>('/profile', {
+    onError: (m) => pushToast(m, 'warning', '📄'),
+  });
 
   useEffect(() => {
-    void loadProfile();
-  }, []);
+    if (!profile.data) return;
+    setStats(profile.data.stats);
+    setBilling(profile.data.billing);
+    setPlanLimits(profile.data.planLimits);
+    useApp.setState({
+      user: profile.data.user,
+      pet: profile.data.pet,
+      integration: profile.data.integration,
+    });
+  }, [profile.data]);
+
+  const loadProfile = () => profile.refetch();
 
   useEffect(() => {
     if (!pet) return;

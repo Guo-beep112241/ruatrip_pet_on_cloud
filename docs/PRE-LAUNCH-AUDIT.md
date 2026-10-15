@@ -96,7 +96,7 @@
 - [x] **M4** 启动时校验配置，密钥格式不对直接警告
 - [x] **M5** `/api/health` 增加数据源与存储的真实探测
 - [x] **M6** 拆分 `index.ts` 为按域的路由模块
-- [ ] **M7** 前端抽出统一的 `useApi` 数据请求 hook
+- [x] **M7** 前端抽出统一的 `useApi` 数据请求 hook
 
 ### 阶段 5：产品功能补齐（F2、F3、F4、F9）
 
@@ -109,7 +109,7 @@
 
 - [x] **O2** GitHub Actions CI（typecheck + test + build）
 - [x] **O1** 关键链路的 E2E 冒烟测试（脚本化，非浏览器）
-- [ ] **O3** 错误上报抽象 + 结构化日志
+- [x] **O3** 错误上报抽象 + 结构化日志
 - [x] **O4** 数据备份：JSON 导出接口 + 定时备份脚本说明
 - [x] **O5** `.nvmrc` + engines 收紧
 
@@ -142,11 +142,31 @@ npm start           # 生产模式端到端可用
 | 1 安全加固（S1~S5） | ✅ 完成 | `fix(security): 修复 SVG 注入、CORS 通配、敏感路径探测；加入安全头与双层限流` |
 | 2 数据层与持久化（B1、B3、B4） | ✅ 完成 | `feat(persistence): 可插拔持久化驱动` + `feat(storage): 对象存储适配` |
 | 3 账号体系（B2、F5、F6） | ✅ 完成 | `feat(auth)` + `feat(billing): 消费限额与宠物位配额` |
-| 4 健壮性（M1~M7） | 🟡 进行中（仅 M7 剩余） | `refactor(server): 按业务域拆分路由 + 启动配置校验` |
+| 4 健壮性（M1~M7） | ✅ 完成 | `refactor(server): 路由拆分 + 启动校验` + `feat(web): useApi` |
 | 5 产品功能补齐（F2、F3、F4、F9） | ✅ 完成 | `feat: 推送、埋点、情绪关怀、微信兼容` |
-| 6 工程化（O1~O5） | 🟡 进行中（O3、O4 脚本化已完成，见下） | `chore(ci): CI + E2E 冒烟 + 备份脚本 + 版本约束` |
+| 6 工程化（O1~O5） | ✅ 完成 | `chore(ci)` + `feat(observability): 结构化日志与错误上报` |
 
 > 本表在每阶段完成后更新，并附上对应的 commit hash。
+
+### 阶段 4/6 补充证据（M7 / O3）
+
+| 项 | 验证方式 | 结果 |
+| --- | --- | --- |
+| M7 useApi | Profile 页改用 `useApi('/profile')` | loading/error/data 三态统一；卸载后不再 setState；请求竞态取最新一次 |
+| O3 脱敏 | 传 `{password, LLM_API_KEY, text, content, photoUrl, nested:{text}}` | 全部替换为 `[redacted]`，嵌套层也生效；长字符串截断到 200 字符 |
+| O3 JSON Lines | `NODE_ENV=production` 启动 | 输出可 `JSON.parse` 的单行 JSON，含 `level/time/msg/requestId/path/status/ms` |
+| O3 开发可读 | 开发环境启动 | 输出 `! [reqId] message  path=/api/x` 而非 JSON |
+| O3 请求串联 | 请求任意接口 | 响应带 `x-request-id`，访问日志与错误日志共用同一个 id |
+| O3 错误分级 | 四类业务错误 | 400 / 404 / 404 / 403，服务端 **0 条 500 级日志** |
+| O3 未登记告警 | 抛一个未登记的错误码 | 打警告提示补进 `http/errors.ts`，避免悄悄退化成 500 |
+| O3 前端上报 | `POST /api/client-error` | 合法上报 200 并落日志；非法上报（缺崩溃信息）400 |
+
+**修掉的两个问题**：
+1. `DESTINATION_NOT_FOUND` 最初被归进 400 组，实测应为 **404**（资源类），
+   已移到 NOT_FOUND 组 —— 这类归类错误会让前端拿到错误的状态码做错分支。
+2. 前端上报字段原本叫 `message`，被日志脱敏规则命中而显示 `[redacted]`，
+   真正的崩溃原因看不到。已改用专用字段名 `errorMessage`，
+   既保住「`message` 可能含对话内容所以脱敏」这条规则，又能看到崩溃信息。
 
 ### 阶段 6 证据（O1 / O2 / O4 / O5）
 
