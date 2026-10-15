@@ -4,7 +4,7 @@ import { Camera, Compass, Gift, Locate, MapPin, Sparkles } from 'lucide-react';
 import { AppShell } from '../components/AppShell';
 import { Button, Card, Chip, EmptyState, SectionTitle, Sheet } from '../components/ui';
 import { useApp } from '../store/app';
-import { api, withQuery } from '../api/client';
+import { api, compressImage, uploadImage, withQuery } from '../api/client';
 import type { CheckinResponse, Destination, TravelOverviewResponse } from '../api/types';
 import { DESTINATIONS } from '../api/types';
 
@@ -62,14 +62,24 @@ export function CheckinMap() {
     );
   };
 
-  const onPickPhoto = (file: File) => {
-    if (file.size > 6 * 1024 * 1024) {
-      pushToast('照片超过 6MB，先压缩一下再上传。', 'warning', '🖼️');
-      return;
+  const [uploading, setUploading] = useState(false);
+
+  /**
+   * 选完照片立即上传拿到 URL（审计 B3）。
+   * 不再把 base64 存进 state 后塞进 JSON —— 那会让数据文件迅速膨胀。
+   */
+  const onPickPhoto = async (file: File) => {
+    setUploading(true);
+    try {
+      const compressed = await compressImage(file);
+      const result = await uploadImage(compressed, 'checkin');
+      setPhoto(result.url);
+      pushToast(`照片已上传（${(result.bytes / 1024).toFixed(0)}KB）`, 'plain', '🖼️');
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : '上传失败', 'warning', '🖼️');
+    } finally {
+      setUploading(false);
     }
-    const reader = new FileReader();
-    reader.onload = () => setPhoto(String(reader.result));
-    reader.readAsDataURL(file);
   };
 
   const doCheckin = async () => {
@@ -200,11 +210,17 @@ export function CheckinMap() {
                     className="hidden"
                     onChange={(e) => {
                       const file = e.target.files?.[0];
-                      if (file) onPickPhoto(file);
+                      if (file) void onPickPhoto(file);
+                      e.target.value = '';
                     }}
                   />
-                  <Button variant="quiet" icon={<Camera size={15} aria-hidden />} onClick={() => fileRef.current?.click()}>
-                    {photo ? '换一张' : '拍照 / 上传'}
+                  <Button
+                    variant="quiet"
+                    icon={<Camera size={15} aria-hidden />}
+                    onClick={() => fileRef.current?.click()}
+                    disabled={uploading}
+                  >
+                    {uploading ? '上传中…' : photo ? '换一张' : '拍照 / 上传'}
                   </Button>
                   {photo ? (
                     <>
@@ -221,7 +237,7 @@ export function CheckinMap() {
               </div>
 
               <div className="mt-base flex gap-snug">
-                <Button block onClick={() => void doCheckin()} disabled={busy}>
+                <Button block onClick={() => void doCheckin()} disabled={busy || uploading}>
                   <MapPin size={15} aria-hidden />
                   {busy ? '合成中…' : '立即打卡'}
                 </Button>

@@ -11,6 +11,8 @@ export interface Ctx {
   params: Record<string, string>;
   query: URLSearchParams;
   body: unknown;
+  /** multipart 请求的原始字节（普通 JSON 请求为 null） */
+  rawBody?: Buffer | null;
 }
 
 export type Handler = (ctx: Ctx) => Promise<unknown> | unknown;
@@ -69,6 +71,19 @@ export class Router {
     }
     return null;
   }
+}
+
+/** 读取原始字节（multipart 需要，不能转成字符串） */
+export async function readRawBody(req: IncomingMessage, limitBytes = 30 * 1024 * 1024): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    size += buf.length;
+    if (size > limitBytes) throw new Error('PAYLOAD_TOO_LARGE');
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks);
 }
 
 export async function readJsonBody(req: IncomingMessage, limitBytes = 12 * 1024 * 1024): Promise<unknown> {

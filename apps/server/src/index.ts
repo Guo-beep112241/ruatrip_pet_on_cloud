@@ -10,10 +10,13 @@ import { createServer } from 'node:http';
 import { config } from './config.ts';
 import { getStore } from './db/store.ts';
 import { Repositories } from './repositories/index.ts';
-import { readJsonBody, Router, sendError, sendJson, type Ctx } from './http/router.ts';
+import { readJsonBody, readRawBody, Router, sendError, sendJson, type Ctx } from './http/router.ts';
 import { serveStatic, webDistAvailable } from './http/static.ts';
 import { API_CSP, applyBaseHeaders, applyCors, contentSecurityPolicy } from './http/security.ts';
 import { DEFAULT_DAILY_LIMITS, clientKey, dailyQuota, rateLimitStore, ruleFor } from './http/rateLimit.ts';
+import { MultipartError, parseBoundary, parseMultipart } from './http/multipart.ts';
+import { hasObjectStorage } from './config.ts';
+import { buildKey, createStorage, decodeImage, validateImageRef } from './storage/index.ts';
 import { integrationReport } from './adapters/registry.ts';
 import {
   DESTINATIONS,
@@ -53,6 +56,39 @@ import { activeTtsProvider, VOICE_PRESETS } from './services/adapters-bridge.ts'
 
 const store = getStore(config.dataDir);
 const repos = new Repositories(store);
+
+/** 对象存储：四个 S3 变量齐全就用 S3，否则本地磁盘（审计 B3） */
+const storage = createStorage({
+  dataDir: config.dataDir,
+  s3: {
+    endpoint: config.storage.endpoint,
+    bucket: config.storage.bucket,
+    accessKeyId: config.storage.accessKeyId,
+    secretAccessKey: config.storage.secretAccessKey,
+    region: config.storage.region,
+    ...(config.storage.publicBaseUrl ? { publicBaseUrl: config.storage.publicBaseUrl } : {}),
+    ...(config.storage.forcePathStyle !== undefined ? { forcePathStyle: config.storage.forcePathStyle } : {}),
+  },
+});
+
+/** 允许的图片引用前缀：本地驱动与 CDN */
+function imageRefPrefixes(): string[] {
+  const prefixes = [storage.urlFor('')];
+  if (config.storage.publicBaseUrl) prefixes.push(config.storage.publicBaseUrl);
+  return prefixes.filter(Boolean);
+}
+
+/** 校验并使用图片引用；不合法就抛 400 并提示改用上传接口 */
+function requireValidImageRef(input: unknown, field: string): string {
+  const verdict = validateImageRef(input, { allowedPrefixes: imageRefPrefixes() });
+  if (!verdict.ok) {
+    throw Object.assign(new Error(verdict.reason ?? 'INVALID_IMAGE_REF'), {
+      status: 400,
+      field,
+    });
+  }
+  return verdict.value;
+}
 
 /* ------------------------------------------------------------------ */
 /* 用户：单用户本地档案（多用户版本接入鉴权后替换本段）                        */
@@ -196,6 +232,114 @@ router.get('/api/asset/pet.svg', (ctx) => {
   });
   ctx.res.end(svg);
   return null;
+});
+
+/* ------------------------------------------------------------------ */
+/* 文件上传（审计 B3：照片不再以 data URL 存进 JSON）                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 本地存储驱动的文件服务。
+ *
+ * 用 S3/COS/R2 时图片走 CDN，不需要这个路由；
+ * 用本地磁盘（默认）时，前端拿到的 URL 是 /uploads/xxx，
+ * 由这里读盘返回。生产环境建议让 Nginx/Caddy 直接服务 uploads 目录，
+ * 性能更好（见 docs/DEPLOYMENT.md）。
+ */
+router.get('/api/uploads/:owner/:file', async (ctx) => {
+  if (storage.driver !== 'local') {
+    ctx.res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    ctx.res.end('当前使用对象存储，图片请从 CDN 访问');
+    return null;
+  }
+  const key = `${ctx.params.owner}/${ctx.params.file}`;
+  const object = await storage.get(key);
+  if (!object) {
+    ctx.res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    ctx.res.end('not found');
+    return null;
+  }
+  ctx.res.writeHead(200, {
+    'content-type': object.contentType,
+    'cache-control': 'public, max-age=31536000, immutable',
+    'x-content-type-options': 'nosniff',
+    // 图片不该被当成文档解析，避免 SVG 之类的向量被利用
+    'content-security-policy': "default-src 'none'; sandbox",
+  });
+  ctx.res.end(object.data);
+  return null;
+});
+
+/**
+ * 上传图片。
+ *
+ * 支持两种入参：
+ *   1. multipart/form-data —— 手机 <input type="file" capture> 走这条
+ *   2. JSON { image: "data:image/jpeg;base64,..." } —— 兼容旧前端
+ *
+ * 校验：魔数判断真实类型（不信任客户端声明的 MIME）、4MB 上限、
+ * 存储键由服务端生成（防目录穿越）。
+ */
+router.post('/api/upload', async (ctx) => {
+  const user = currentUser();
+  let data: Buffer | null = null;
+  let declared: string | undefined;
+  let purpose = 'photo';
+
+  if (ctx.rawBody) {
+    const boundary = multipartBoundary(ctx.req.headers['content-type']);
+    if (!boundary) throw Object.assign(new Error('INVALID_MULTIPART'), { status: 400 });
+    const parsed = parseMultipart(ctx.rawBody, boundary, { maxFileBytes: config.storage.maxImageBytes });
+    const file = parsed.files.find((f) => f.fieldName === 'file') ?? parsed.files[0];
+    if (!file) throw Object.assign(new Error('NO_FILE'), { status: 400 });
+    data = file.data;
+    declared = file.contentType;
+    purpose = (parsed.fields.purpose ?? 'photo').slice(0, 24);
+  } else {
+    const b = (ctx.body ?? {}) as { image?: string; purpose?: string };
+    if (typeof b.image !== 'string') throw Object.assign(new Error('NO_FILE'), { status: 400 });
+    const decoded = decodeImage(b.image, config.storage.maxImageBytes);
+    if (!decoded.ok || !decoded.data || !decoded.ext) {
+      throw Object.assign(new Error(decoded.reason ?? 'INVALID_IMAGE'), { status: 400 });
+    }
+    data = decoded.data;
+    declared = decoded.mime;
+    purpose = (b.purpose ?? 'photo').slice(0, 24);
+  }
+
+  const verified = decodeImage(data, config.storage.maxImageBytes);
+  if (!verified.ok || !verified.data || !verified.ext || !verified.mime) {
+    throw Object.assign(new Error(verified.reason ?? 'INVALID_IMAGE'), { status: 400 });
+  }
+  void declared; // 已由魔数决定真实类型，声明值仅用于参考
+
+  // 键格式：<ownerId>/<random>.<ext>，与本地 URL 及 S3 对象名一一对应
+  const key = buildKey(user.id, verified.ext);
+  const stored = await storage.put({ key, data: verified.data, contentType: verified.mime });
+
+  return {
+    ok: true,
+    data: {
+      url: stored.url,
+      key: stored.key,
+      bytes: stored.bytes,
+      contentType: stored.contentType,
+      driver: storage.driver,
+      purpose,
+    },
+  };
+});
+
+/** 删除已上传的图片（审计 F5：用户必须有删除通道） */
+router.delete('/api/upload/:owner/:file', async (ctx) => {
+  const user = currentUser();
+  // 只允许删除自己目录下的文件
+  if (ctx.params.owner !== user.id) {
+    throw Object.assign(new Error('FORBIDDEN'), { status: 403 });
+  }
+  const key = `${ctx.params.owner}/${ctx.params.file}`;
+  const removed = await storage.delete(key);
+  return { ok: true, data: { removed, key } };
 });
 
 /* -------- 偏好问卷 -------- */
@@ -475,7 +619,7 @@ router.post('/api/travel/checkin', async (ctx) => {
   if (!destinationById(body.destinationId ?? '')) throw Object.assign(new Error('DESTINATION_NOT_FOUND'), { status: 404 });
   const outcome = await performCheckin(repos, pet, {
     destinationId: body.destinationId!,
-    photoUrl: body.photoUrl ?? null,
+    photoUrl: requireValidImageRef(body.photoUrl, 'photoUrl') || null,
     ...(body.lat !== undefined ? { lat: body.lat } : {}),
     ...(body.lng !== undefined ? { lng: body.lng } : {}),
     ...(body.note ? { note: body.note } : {}),
@@ -543,7 +687,7 @@ router.post('/api/capsule', (ctx) => {
   const project = {
     id: `cap-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     userId: user.id,
-    photoUrl: body.photoUrl ?? '',
+    photoUrl: requireValidImageRef(body.photoUrl, 'photoUrl'),
     petName: body.petName?.trim() || '它',
     letterTo: body.letterTo ?? '',
     stage: 'uploaded' as const,
@@ -671,6 +815,12 @@ router.post('/api/subscribe', (ctx) => {
   };
 });
 
+/** 判断请求是否为 multipart/form-data */
+function multipartBoundary(contentType: string | string[] | undefined): string | null {
+  const value = Array.isArray(contentType) ? contentType[0] : contentType;
+  return parseBoundary(value);
+}
+
 /* ------------------------------------------------------------------ */
 /* 服务器                                                              */
 /* ------------------------------------------------------------------ */
@@ -718,8 +868,14 @@ const server = createServer(async (req, res) => {
 
   try {
     let body: unknown = null;
+    let rawBody: Buffer | null = null;
     if (req.method && ['POST', 'PATCH', 'PUT'].includes(req.method)) {
-      body = await readJsonBody(req);
+      if (multipartBoundary(req.headers['content-type'])) {
+        // 手机拍照上传走 multipart：必须按字节读，转字符串会破坏图片
+        rawBody = await readRawBody(req, 30 * 1024 * 1024);
+      } else {
+        body = await readJsonBody(req);
+      }
     }
     const ctx: Ctx = {
       req,
@@ -728,6 +884,7 @@ const server = createServer(async (req, res) => {
       params: matched.params,
       query: url.searchParams,
       body,
+      rawBody,
     };
     const result = await matched.handler(ctx);
     if (result !== null && !res.writableEnded) {
@@ -757,6 +914,10 @@ function humanizeError(code: string): string {
     CAPSULE_NOT_FOUND: '没有这个时光胶囊项目。',
     DAILY_QUOTA_EXCEEDED: '今天的额度用完了，明天再来吧。这是为了保护服务不被人刷爆。',
     RATE_LIMITED: '请求太频繁了，歇一会儿再试。',
+    NO_FILE: '没有收到图片，请重新选择一张。',
+    INVALID_MULTIPART: '上传格式不正确，请重试。',
+    INVALID_IMAGE: '这个文件不是可用的图片。',
+    FORBIDDEN: '没有权限操作这个文件。',
     JOB_NOT_FOUND: '没有这个生成任务。',
   };
   return map[code] ?? code;

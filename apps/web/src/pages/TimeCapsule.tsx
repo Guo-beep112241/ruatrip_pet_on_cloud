@@ -4,7 +4,7 @@ import { HeartHandshake, Image as ImageIcon, Loader2, PenLine, ShieldCheck } fro
 import { AppShell } from '../components/AppShell';
 import { Button, Card, Chip, EmptyState, ProgressBar, SectionTitle } from '../components/ui';
 import { useApp } from '../store/app';
-import { api } from '../api/client';
+import { api, compressImage, uploadImage } from '../api/client';
 import type { CapsuleCreateResponse, CapsuleListResponse, CapsuleProject } from '../api/types';
 import { DESTINATIONS } from '../api/types';
 
@@ -75,14 +75,20 @@ export function TimeCapsule() {
     }
   };
 
-  const onPickPhoto = (file: File) => {
-    if (file.size > 6 * 1024 * 1024) {
-      pushToast('照片超过 6MB，先压缩一下再上传。', 'warning', '🖼️');
-      return;
+  const [uploading, setUploading] = useState(false);
+
+  /** 旧照同样先上传再存 URL，避免把 base64 写进数据库（审计 B3） */
+  const onPickPhoto = async (file: File) => {
+    setUploading(true);
+    try {
+      const compressed = await compressImage(file);
+      const result = await uploadImage(compressed, 'capsule');
+      setPhoto(result.url);
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : '上传失败', 'warning', '🖼️');
+    } finally {
+      setUploading(false);
     }
-    const reader = new FileReader();
-    reader.onload = () => setPhoto(String(reader.result));
-    reader.readAsDataURL(file);
   };
 
   return (
@@ -120,7 +126,8 @@ export function TimeCapsule() {
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];
-              if (file) onPickPhoto(file);
+              if (file) void onPickPhoto(file);
+              e.target.value = '';
             }}
           />
 
@@ -137,7 +144,9 @@ export function TimeCapsule() {
             ) : (
               <>
                 <ImageIcon size={26} className="text-text-muted" aria-hidden />
-                <span className="text-body-sm text-text-muted">点击选择一张旧照片</span>
+                <span className="text-body-sm text-text-muted">
+                  {uploading ? '正在上传…' : '点击选择一张旧照片'}
+                </span>
                 <span className="text-caption-sm text-text-muted">支持相机直接拍，也支持相册</span>
               </>
             )}
@@ -172,7 +181,7 @@ export function TimeCapsule() {
             </div>
           </div>
 
-          <Button block className="mt-base" onClick={() => void submit()} disabled={busy || !photo}>
+          <Button block className="mt-base" onClick={() => void submit()} disabled={busy || uploading || !photo}>
             {busy ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <HeartHandshake size={16} aria-hidden />}
             开始毛绒复原
           </Button>

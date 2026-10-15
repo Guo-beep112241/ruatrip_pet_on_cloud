@@ -232,6 +232,46 @@ export const config = {
       return str('IMAGE_COMPOSER_BASE_URL');
     },
   },
+
+  /**
+   * 对象存储（审计 B3）。
+   *
+   * 四个 S3 必填项齐全时自动使用 S3 兼容驱动，否则回落到本地磁盘。
+   * Cloudflare R2 / 腾讯云 COS / 阿里云 OSS / MinIO / AWS S3 都是 S3 协议。
+   */
+  storage: {
+    get endpoint() {
+      return str('STORAGE_ENDPOINT');
+    },
+    get bucket() {
+      return str('STORAGE_BUCKET');
+    },
+    get accessKeyId() {
+      return str('STORAGE_ACCESS_KEY');
+    },
+    get secretAccessKey() {
+      return str('STORAGE_SECRET_KEY');
+    },
+    get region() {
+      return str('STORAGE_REGION', 'auto');
+    },
+    /** CDN 或公开访问前缀，例如 https://cdn.example.com */
+    get publicBaseUrl() {
+      return str('CDN_BASE_URL');
+    },
+    get forcePathStyle() {
+      const raw = str('STORAGE_FORCE_PATH_STYLE');
+      if (raw === '') return undefined;
+      return raw === 'true' || raw === '1';
+    },
+    /** 本地驱动对外暴露的 URL 前缀（反向代理要把这个路径转到服务端） */
+    get publicPrefix() {
+      return str('STORAGE_PUBLIC_PREFIX', '/uploads');
+    },
+    get maxImageBytes() {
+      return num('MAX_IMAGE_BYTES', 4 * 1024 * 1024);
+    },
+  },
 };
 
 export type AppConfig = typeof config;
@@ -250,3 +290,12 @@ export const hasTts = (): boolean => Boolean(config.minimax.apiKey) || Boolean(c
 export const hasAsr = (): boolean => Boolean(config.asr.apiKey && config.asr.baseUrl);
 
 export const hasImageComposer = (): boolean => Boolean(config.imageComposer.apiKey && config.imageComposer.baseUrl);
+
+/** 对象存储是否配了 S3（否则用本地磁盘） */
+export const hasObjectStorage = (): boolean =>
+  Boolean(
+    config.storage.endpoint &&
+      config.storage.bucket &&
+      config.storage.accessKeyId &&
+      config.storage.secretAccessKey,
+  );
