@@ -110,12 +110,26 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
   'api:tts': { windowMs: 60_000, max: 40 },
   // 时光胶囊复原（图生 3D，成本最高）
   'api:capsule': { windowMs: 60 * 60_000, max: 3 },
-  // 认证接口：防暴力破解
-  'api:auth': { windowMs: 15 * 60_000, max: 10 },
+  // 认证接口：防暴力破解。20 次/15 分钟在「人手输错几次」与
+  // 「自动化撞库」之间取平衡；如需更严可自行调小。
+  'api:auth': { windowMs: 15 * 60_000, max: 20 },
 };
 
 export function ruleFor(bucket: keyof typeof RATE_LIMITS | string): RateLimitRule {
   return RATE_LIMITS[bucket] ?? RATE_LIMITS['api:read']!;
+}
+
+/**
+ * 是否禁用限流。
+ *
+ * 适用场景：
+ *   - 集成测试（会连续发大量请求）
+ *   - 自建/内网部署，前面已有网关或 WAF 做限流
+ * 生产公网部署**不要**开这个开关：它会让按次计费的接口失去保护。
+ */
+export function rateLimitDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.RATE_LIMIT_DISABLED ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes';
 }
 
 /** 从请求里取客户端标识：优先登录用户，其次 IP */

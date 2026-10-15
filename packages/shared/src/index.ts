@@ -269,6 +269,8 @@ export type ChatLayer = 'instant' | 'scene' | 'free' | 'memory';
 export interface ChatMessage {
   id: string;
   conversationId: string;
+  /** 所属宠物；账号注销时按此清理（避免遗留孤儿消息） */
+  petId: string;
   role: 'user' | 'pet';
   content: string;
   layer: ChatLayer;

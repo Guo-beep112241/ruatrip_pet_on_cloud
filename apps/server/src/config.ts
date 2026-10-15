@@ -234,6 +234,30 @@ export const config = {
   },
 
   /**
+   * 认证（审计 B2）。
+   *
+   * SESSION_SECRET 未配置时：开发环境自动生成（重启后旧 token 失效，可接受），
+   * 生产环境**拒绝启动** —— 用可预测密钥签名等于没有鉴权。
+   */
+  get sessionSecret(): string {
+    return str('SESSION_SECRET');
+  },
+  /**
+   * 认证开关：
+   *   required —— 未登录一律 401。**生产环境必须用它**（默认值）
+   *   optional —— 仅当库里存在「遗留占位账号」（email 以 @legacy.local 结尾，
+   *               由旧版单用户数据迁移而来）时，才允许匿名请求落到它，
+   *               用于平滑迁移老部署。任何通过正常注册创建的账号都不允许匿名访问。
+   *
+   * 注意：默认是 required。早期版本默认 optional 且「只有一个账号就放行」，
+   * 会导致「刚注册第一个用户的真实部署」被匿名访问——这是个安全漏洞，已修掉。
+   */
+  get authMode(): 'required' | 'optional' {
+    const raw = str('AUTH_MODE', '').toLowerCase();
+    return raw === 'optional' ? 'optional' : 'required';
+  },
+
+  /**
    * 持久化（审计 B1）。
    *
    * driver=auto 时的判定顺序：
@@ -254,14 +278,25 @@ export const config = {
     get databaseUrl(): string {
       return str('DATABASE_URL');
     },
-    /** SQLite 文件路径；DATABASE_URL=file:xxx 时也认 */
+    /**
+     * SQLite 文件路径，优先级：
+     *   1. DATABASE_URL=file:xxx
+     *   2. SQLITE_FILE
+     *   3. <DATA_DIR>/ruatrip.db
+     *
+     * 第 3 条很关键：早期实现写死了 `REPO_ROOT/.data/ruatrip.db`，
+     * 导致设置 DATA_DIR 被忽略 —— 测试会污染真实数据库，
+     * 生产上把数据放到挂载盘也不生效。
+     */
     get sqliteFile(): string {
       const url = this.databaseUrl;
       if (url.startsWith('file:')) {
         const p = url.slice(5);
         return p.startsWith('/') ? p : resolve(REPO_ROOT, p);
       }
-      return resolve(REPO_ROOT, str('SQLITE_FILE', './.data/ruatrip.db'));
+      const explicit = str('SQLITE_FILE');
+      if (explicit) return resolve(REPO_ROOT, explicit);
+      return resolve(config.dataDir, 'ruatrip.db');
     },
     get pgSsl(): boolean {
       const raw = str('PG_SSL');

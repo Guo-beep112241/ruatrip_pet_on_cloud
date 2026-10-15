@@ -58,6 +58,7 @@ export function openingMessage(repos: Repositories, pet: Pet, conversationId: st
   const msg: ChatMessage = {
     id: uid('msg'),
     conversationId,
+    petId: pet.id,
     role: 'pet',
     content: text,
     layer: memory ? 'memory' : 'instant',
@@ -92,6 +93,7 @@ export async function sendMessage(
   const userMessage: ChatMessage = {
     id: uid('msg'),
     conversationId: conv.id,
+    petId: pet.id,
     role: 'user',
     content: input.text,
     layer: 'free',
@@ -108,6 +110,7 @@ export async function sendMessage(
     const petMessage: ChatMessage = {
       id: uid('msg'),
       conversationId: conv.id,
+      petId: pet.id,
       role: 'pet',
       content: verdict.deflection ?? '嗯……我们聊点别的吧。',
       layer: 'instant',
@@ -179,6 +182,7 @@ export async function sendMessage(
   const petMessage: ChatMessage = {
     id: uid('msg'),
     conversationId: conv.id,
+    petId: pet.id,
     role: 'pet',
     content: petText,
     layer: fromModel ? 'free' : layer,
@@ -191,7 +195,7 @@ export async function sendMessage(
   const updated = touch(repos, conv, petMessage);
 
   // 记忆：每 6 条消息做一次摘要提炼
-  const capacity = capacityFor(repos.getUser()?.tier ?? 'free');
+  const capacity = capacityFor(repos.getAccount(pet.ownerId)?.profile.tier ?? 'free');
   const all = repos.listMessages(conv.id);
   // 第 2 条消息后就做第一次摘要，之后每 6 条一次：
   // 这样「被记住」的体验在第一天就成立，而不是等到攒够对话量。

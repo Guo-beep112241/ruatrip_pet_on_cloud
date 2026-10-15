@@ -322,6 +322,7 @@ export const useApp = create<AppState & AppActions>((set, get) => ({
     const optimistic: ChatMessage = {
       id: `local-${Date.now()}`,
       conversationId: get().conversation?.id ?? 'local',
+      petId: pet.id,
       role: 'user',
       content: text,
       layer: 'free',

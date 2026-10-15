@@ -6,7 +6,7 @@
  *   - 所有外部 AI / 3D / 语音能力都通过 adapters 抽象，未配置时回落 Mock
  *   - /api/integration 明确列出「需要介入 API 的地方」
  */
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { config } from './config.ts';
 import { getStore } from './db/store.ts';
 import { createPersistenceDriver } from './db/drivers.ts';
@@ -14,8 +14,25 @@ import { Repositories } from './repositories/index.ts';
 import { readJsonBody, readRawBody, Router, sendError, sendJson, type Ctx } from './http/router.ts';
 import { serveStatic, webDistAvailable } from './http/static.ts';
 import { API_CSP, applyBaseHeaders, applyCors, contentSecurityPolicy } from './http/security.ts';
-import { DEFAULT_DAILY_LIMITS, clientKey, dailyQuota, rateLimitStore, ruleFor } from './http/rateLimit.ts';
+import {
+  DEFAULT_DAILY_LIMITS,
+  clientKey,
+  dailyQuota,
+  rateLimitDisabled,
+  rateLimitStore,
+  ruleFor,
+} from './http/rateLimit.ts';
 import { MultipartError, parseBoundary, parseMultipart } from './http/multipart.ts';
+import {
+  AuthError,
+  assertCapsuleOwned,
+  assertConversationOwned,
+  assertPetOwned,
+  resolveAuth,
+  sessionSecret,
+  type AuthContext,
+} from './http/auth.ts';
+import { hashPassword, newUserId, verifyPassword, passwordIssues, normalizeEmail, issueSession } from './auth/index.ts';
 import { hasObjectStorage } from './config.ts';
 import { buildKey, createStorage, decodeImage, validateImageRef } from './storage/index.ts';
 import { integrationReport } from './adapters/registry.ts';
@@ -109,27 +126,41 @@ function requireValidImageRef(input: unknown, field: string): string {
 /* ------------------------------------------------------------------ */
 /* 用户：单用户本地档案（多用户版本接入鉴权后替换本段）                        */
 /* ------------------------------------------------------------------ */
-function currentUser(): UserProfile {
-  const existing = repos.getUser();
-  if (existing) return existing;
-  const created: UserProfile = {
-    id: 'user-local',
-    nickname: '毛绒屋主人',
-    avatarEmoji: '🧸',
-    tier: 'free',
-    petSlots: 1,
-    streakDays: 1,
-    claimedMilestones: [],
-    minorGuardEnabled: true,
-    monthlySpendLimit: 200,
-    createdAt: nowIso(),
-  };
-  repos.saveUser(created);
-  return created;
+/**
+ * 启动时的数据迁移：旧版单例 user → users 集合（审计 B2）。
+ * 不迁移的话，老用户的宠物 ownerId 会指向一个不存在的账号，等于全部失联。
+ */
+const migration = repos.migrateLegacyUser();
+if (migration.migrated) {
+  console.log(`     已迁移旧版单用户数据到账号集合（userId=${migration.userId}）`);
 }
 
-function activePet(petId?: string | null): Pet | null {
-  const pet = petId ? repos.getPet(petId) : repos.getActivePet();
+/** 进程级会话密钥（生产环境缺配置会在这里直接抛错，见 auth/index.ts） */
+const SESSION_SECRET = sessionSecret({
+  secret: config.sessionSecret,
+  isProduction: config.env === 'production',
+});
+
+/**
+ * 从请求解析当前账号。
+ * 原来这里是 `currentUser()` —— 永远返回同一个 user-local，
+ * 也就是任何人打开网址都是同一只宠物。现在改为按 token 解析。
+ */
+function currentUser(req: Ctx['req']): UserProfile {
+  return authOf(req).account.profile;
+}
+
+function authOf(req: Ctx['req']): AuthContext {
+  return resolveAuth(req, {
+    repos,
+    secret: SESSION_SECRET,
+    mode: config.authMode,
+    isProduction: config.env === 'production',
+  });
+}
+
+function activePet(petId?: string | null, userId?: string): Pet | null {
+  const pet = petId ? repos.getPet(petId) : repos.getActivePet(userId);
   if (!pet) return null;
   return refreshPetState(repos, pet);
 }
@@ -151,7 +182,14 @@ function enforceDailyQuota(kind: keyof typeof DEFAULT_DAILY_LIMITS, userId: stri
   }
 }
 
-function requirePet(petId?: string | null): Pet {
+/**
+ * 取宠物并校验归属。
+ *
+ * 修复前的版本只检查「宠物存在」，不检查「是不是你的」——
+ * 任何人拿到别人的 petId 都能读写。现在必须传入当前 userId。
+ */
+function requirePet(petId: string | null | undefined, userId: string): Pet {
+  assertPetOwned(repos, userId, petId);
   const pet = activePet(petId);
   if (!pet) {
     const error = new Error('PET_NOT_FOUND') as Error & { status?: number };
@@ -175,6 +213,10 @@ function requirePet(petId?: string | null): Pet {
  *   /api/capsule         → 图生 3D（成本最高）
  */
 const EXPENSIVE_ROUTES: Record<string, string> = {
+  // 认证接口用更严的额度：15 分钟 10 次，防暴力破解与撞库
+  'POST /api/auth/register': 'api:auth',
+  'POST /api/auth/login': 'api:auth',
+  'POST /api/auth/password': 'api:auth',
   'POST /api/chat': 'api:chat',
   'POST /api/pet': 'api:pet:create',
   'POST /api/travel/checkin': 'api:checkin',
@@ -184,12 +226,164 @@ const EXPENSIVE_ROUTES: Record<string, string> = {
 
 const router = new Router();
 
+/* ------------------------------------------------------------------ */
+/* 认证（审计 B2）                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 前端启动时的第一个请求：库里有没有账号、是否需要登录。
+ * 有了它，前端才能在「首次部署 → 引导注册」与「老库 → 直接进应用」之间正确选择。
+ */
+router.get('/api/auth/status', (ctx) => {
+  const accounts = repos.listAccounts().length;
+  const mode = config.authMode;
+  // 匿名请求也能拿到这个信息：它只暴露「有没有账号」这一个布尔量
+  const authenticated = (() => {
+    try {
+      return authOf(ctx.req).authenticated;
+    } catch {
+      return false;
+    }
+  })();
+  return {
+    ok: true,
+    data: {
+      hasAccounts: accounts > 0,
+      accountCount: accounts,
+      mode,
+      /** 无账号且是单用户模式 → 前端直接进引导问卷 */
+      requiresSetup: accounts === 0,
+      authenticated,
+      /** 遗留数据是否需要认领（旧版无邮箱账号） */
+      legacyClaimAvailable: repos.listAccounts().some((a) => a.email.endsWith('@legacy.local')),
+    },
+  };
+});
+
+/** 注册 */
+router.post('/api/auth/register', async (ctx) => {
+  const body = (ctx.body ?? {}) as { email?: string; password?: string; nickname?: string };
+  const email = normalizeEmail(body.email);
+  const password = typeof body.password === 'string' ? body.password : '';
+
+  const issues = passwordIssues(password);
+  if (issues.length) {
+    throw Object.assign(new Error('WEAK_PASSWORD'), { status: 400, detail: issues.join('；') });
+  }
+  if (repos.getAccountByEmail(email)) {
+    throw Object.assign(new Error('EMAIL_TAKEN'), { status: 409 });
+  }
+
+  const account = repos.createAccount({
+    id: newUserId(),
+    email,
+    passwordHash: await hashPassword(password),
+    ...(body.nickname ? { nickname: body.nickname } : {}),
+  });
+  repos.touchLogin(account.id);
+
+  return {
+    ok: true,
+    data: {
+      token: issueSession({ userId: account.id, passwordVersion: account.passwordVersion }, SESSION_SECRET),
+      user: account.profile,
+    },
+  };
+});
+
+/** 登录 */
+router.post('/api/auth/login', async (ctx) => {
+  const body = (ctx.body ?? {}) as { email?: string; password?: string };
+  const email = normalizeEmail(body.email);
+  const password = typeof body.password === 'string' ? body.password : '';
+
+  const account = repos.getAccountByEmail(email);
+  /**
+   * 统一错误信息：不区分「邮箱不存在」与「密码错误」，
+   * 避免被用来枚举已注册邮箱。
+   * 即使账号不存在也跑一次哈希校验，抹平响应时间差异。
+   */
+  const ok = account
+    ? await verifyPassword(password, account.passwordHash)
+    : await verifyPassword(password, 'scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAA');
+  if (!account || !ok) {
+    throw Object.assign(new Error('INVALID_CREDENTIALS'), { status: 401 });
+  }
+
+  repos.touchLogin(account.id);
+  return {
+    ok: true,
+    data: {
+      token: issueSession({ userId: account.id, passwordVersion: account.passwordVersion }, SESSION_SECRET),
+      user: account.profile,
+    },
+  };
+});
+
+/** 当前账号信息 */
+router.get('/api/auth/me', (ctx) => {
+  const auth = authOf(ctx.req);
+  return {
+    ok: true,
+    data: { user: auth.account.profile, authenticated: auth.authenticated },
+  };
+});
+
+/** 改密码：成功后 passwordVersion 自增，所有旧 token 立即失效 */
+router.post('/api/auth/password', async (ctx) => {
+  const auth = authOf(ctx.req);
+  if (!auth.authenticated) throw Object.assign(new Error('AUTH_REQUIRED'), { status: 401 });
+  const body = (ctx.body ?? {}) as { currentPassword?: string; newPassword?: string };
+
+  const current = typeof body.currentPassword === 'string' ? body.currentPassword : '';
+  const next = typeof body.newPassword === 'string' ? body.newPassword : '';
+
+  // 遗留账号（无密码哈希）：允许直接设置新密码，完成「认领」
+  if (auth.account.passwordHash) {
+    const ok = await verifyPassword(current, auth.account.passwordHash);
+    if (!ok) throw Object.assign(new Error('INVALID_CREDENTIALS'), { status: 401 });
+  }
+  const issues = passwordIssues(next);
+  if (issues.length) throw Object.assign(new Error('WEAK_PASSWORD'), { status: 400, detail: issues.join('；') });
+
+  repos.setPassword(auth.userId, await hashPassword(next));
+  const updated = repos.getAccount(auth.userId)!;
+  return {
+    ok: true,
+    data: {
+      // 旧 token 已失效，返回新 token 避免用户被动登出
+      token: issueSession({ userId: updated.id, passwordVersion: updated.passwordVersion }, SESSION_SECRET),
+      user: updated.profile,
+    },
+  };
+});
+
+/**
+ * 注销账号：删除账号与全部关联数据（审计 F5 的数据删除通道）。
+ * 需要输入密码确认，避免会话被劫持时被一键清空。
+ */
+router.delete('/api/auth/account', async (ctx) => {
+  const auth = authOf(ctx.req);
+  if (!auth.authenticated) throw Object.assign(new Error('AUTH_REQUIRED'), { status: 401 });
+  const body = (ctx.body ?? {}) as { password?: string; confirm?: string };
+  if (body.confirm !== 'DELETE') {
+    throw Object.assign(new Error('CONFIRM_REQUIRED'), { status: 400 });
+  }
+  if (auth.account.passwordHash) {
+    const ok = await verifyPassword(String(body.password ?? ''), auth.account.passwordHash);
+    if (!ok) throw Object.assign(new Error('INVALID_CREDENTIALS'), { status: 401 });
+  }
+  const result = repos.deleteAccount(auth.userId);
+  return { ok: true, data: { deleted: true, ...result } };
+});
+
 /* -------- 引导与基础数据 -------- */
 router.get('/api/health', () => ({ ok: true, data: { status: 'up', time: nowIso(), env: config.env } }));
 
-router.get('/api/bootstrap', () => {
-  const user = currentUser();
-  const pet = activePet();
+router.get('/api/bootstrap', (ctx) => {
+  const auth = authOf(ctx.req);
+  const user = auth.account.profile;
+  const pet = activePet(undefined, auth.userId);
   const steps = [
     { step: 'survey', done: Boolean(repos.getAnswers()) },
     { step: 'generate-pet', done: Boolean(pet) },
@@ -297,7 +491,7 @@ router.get('/api/uploads/:owner/:file', async (ctx) => {
  * 存储键由服务端生成（防目录穿越）。
  */
 router.post('/api/upload', async (ctx) => {
-  const user = currentUser();
+  const user = currentUser(ctx.req);
   let data: Buffer | null = null;
   let declared: string | undefined;
   let purpose = 'photo';
@@ -348,7 +542,7 @@ router.post('/api/upload', async (ctx) => {
 
 /** 删除已上传的图片（审计 F5：用户必须有删除通道） */
 router.delete('/api/upload/:owner/:file', async (ctx) => {
-  const user = currentUser();
+  const user = currentUser(ctx.req);
   // 只允许删除自己目录下的文件
   if (ctx.params.owner !== user.id) {
     throw Object.assign(new Error('FORBIDDEN'), { status: 403 });
@@ -395,7 +589,7 @@ router.post('/api/survey', (ctx) => {
 
 /* -------- 宠物生成与展示 -------- */
 router.post('/api/pet', (ctx) => {
-  const user = currentUser();
+  const user = currentUser(ctx.req);
   enforceDailyQuota('petCreate', user.id);
   const body = (ctx.body ?? {}) as { answers?: Record<string, string[]>; name?: string; callName?: string };
   const answers = body.answers ?? repos.getAnswers() ?? {};
@@ -410,14 +604,16 @@ router.post('/api/pet', (ctx) => {
 });
 
 router.get('/api/pet', (ctx) => {
-  const pet = requirePet(ctx.query.get('petId'));
+  const auth = authOf(ctx.req);
+  const pet = requirePet(ctx.query.get('petId') ?? repos.getActivePet(auth.userId)?.id, auth.userId);
   const petId = pet.id;
   return { ok: true, data: { pet, todayGain: todayUsage(repos, petId).totalGain } };
 });
 
 router.patch('/api/pet', (ctx) => {
   const body = (ctx.body ?? {}) as { petId?: string; name?: string; callName?: string; outfitId?: string | null; sceneId?: string };
-  const pet = requirePet(body.petId);
+  const auth = authOf(ctx.req);
+  const pet = requirePet(body.petId, auth.userId);
   const next: Pet = {
     ...pet,
     name: body.name?.trim() || pet.name,
@@ -438,14 +634,18 @@ router.patch('/api/pet', (ctx) => {
 });
 
 router.get('/api/pet/generation/:jobId', (ctx) => {
+  const auth = authOf(ctx.req);
   const job = repos.getJob(ctx.params.jobId!);
   if (!job) throw Object.assign(new Error('JOB_NOT_FOUND'), { status: 404 });
-  const pet = requirePet(job.petId);
+  // 归属校验：jobId 是全局唯一的，不校验就能看到别人的生成进度
+  assertPetOwned(repos, auth.userId, job.petId);
+  const pet = requirePet(job.petId, auth.userId);
   return { ok: true, data: { job, pet, incubatingLines: INCUBATING_LINES } };
 });
 
 router.get('/api/pet/mood', (ctx) => {
-  const pet = requirePet(ctx.query.get('petId'));
+  const auth = authOf(ctx.req);
+  const pet = requirePet(ctx.query.get('petId') ?? repos.getActivePet(auth.userId)?.id, auth.userId);
   const outfits = [...pet.unlockedOutfits];
   return {
     ok: true,
@@ -471,7 +671,8 @@ router.get('/api/pet/mood', (ctx) => {
 router.post('/api/interact', (ctx) => {
   const body = (ctx.body ?? {}) as { petId?: string; action?: 'feed' | 'bathe' | 'play'; toyId?: string };
   const action = body.action ?? 'feed';
-  let pet = requirePet(body.petId);
+  const auth = authOf(ctx.req);
+  let pet = requirePet(body.petId, auth.userId);
 
   // 每次进入都先推进连续陪伴与想念值
   const streak = advanceStreak(repos, pet);
@@ -505,7 +706,8 @@ router.post('/api/interact', (ctx) => {
 /** 抚摸部位：点击身体不同部位有不同反应（说明书 6.3 交互细节） */
 router.post('/api/interact/pet', (ctx) => {
   const body = (ctx.body ?? {}) as { petId?: string; part?: 'head' | 'chin' | 'tail'; gesture?: 'tap' | 'long' | 'double' };
-  const pet = requirePet(body.petId);
+  const auth = authOf(ctx.req);
+  const pet = requirePet(body.petId, auth.userId);
   const key =
     body.gesture === 'long' ? 'pet.long'
       : body.gesture === 'double' ? 'pet.double'
@@ -522,7 +724,8 @@ router.post('/api/interact/pet', (ctx) => {
 });
 
 router.get('/api/affection', (ctx) => {
-  const pet = requirePet(ctx.query.get('petId'));
+  const auth = authOf(ctx.req);
+  const pet = requirePet(ctx.query.get('petId') ?? repos.getActivePet(auth.userId)?.id, auth.userId);
   const usage = todayUsage(repos, pet.id);
   const streakDays = repos.getMeta<number>('streakDays', 1);
   const milestones = [3, 7, 14, 30];
@@ -542,20 +745,23 @@ router.get('/api/affection', (ctx) => {
 
 /* -------- 商店（好感度兑换，禁止购买） -------- */
 router.get('/api/shop', (ctx) => {
-  const pet = requirePet(ctx.query.get('petId'));
+  const auth = authOf(ctx.req);
+  const pet = requirePet(ctx.query.get('petId') ?? repos.getActivePet(auth.userId)?.id, auth.userId);
   return { ok: true, data: shopFor(repos, pet) };
 });
 
 router.post('/api/shop/redeem', (ctx) => {
   const body = (ctx.body ?? {}) as { petId?: string; itemId?: string };
-  const pet = requirePet(body.petId);
+  const auth = authOf(ctx.req);
+  const pet = requirePet(body.petId, auth.userId);
   const result = redeem(repos, pet, body.itemId ?? '');
   return { ok: true, data: result };
 });
 
 /* -------- 真心话小屋 -------- */
 router.get('/api/chat', (ctx) => {
-  const pet = requirePet(ctx.query.get('petId'));
+  const auth = authOf(ctx.req);
+  const pet = requirePet(ctx.query.get('petId') ?? repos.getActivePet(auth.userId)?.id, auth.userId);
   const { conversation, messages } = conversationHistory(repos, pet);
   if (!messages.length) {
     const opening = openingMessage(repos, pet, conversation.id);
@@ -575,8 +781,11 @@ router.post('/api/chat', async (ctx) => {
   const body = (ctx.body ?? {}) as {
     petId?: string; conversationId?: string; text?: string; layer?: string; viaVoice?: boolean;
   };
-  const pet = requirePet(body.petId);
+  const auth = authOf(ctx.req);
+  const pet = requirePet(body.petId, auth.userId);
   enforceDailyQuota('chat', pet.ownerId);
+  // 归属校验：否则可以往别人的会话里插消息
+  if (body.conversationId) assertConversationOwned(repos, auth.userId, body.conversationId);
   const result = await sendMessage(repos, pet, {
     ...(body.conversationId ? { conversationId: body.conversationId } : {}),
     text: (body.text ?? '').slice(0, 500),
@@ -587,8 +796,9 @@ router.post('/api/chat', async (ctx) => {
 });
 
 router.get('/api/chat/memories', (ctx) => {
-  const pet = requirePet(ctx.query.get('petId'));
-  const user = currentUser();
+  const auth = authOf(ctx.req);
+  const pet = requirePet(ctx.query.get('petId') ?? repos.getActivePet(auth.userId)?.id, auth.userId);
+  const user = currentUser(ctx.req);
   return {
     ok: true,
     data: { memories: repos.listMemories(pet.id), capacity: capacityFor(user.tier) },
@@ -597,7 +807,8 @@ router.get('/api/chat/memories', (ctx) => {
 
 router.post('/api/tts', async (ctx) => {
   const body = (ctx.body ?? {}) as { petId?: string; text?: string };
-  const pet = requirePet(body.petId);
+  const auth = authOf(ctx.req);
+  const pet = requirePet(body.petId, auth.userId);
   enforceDailyQuota('tts', pet.ownerId);
   const provider = activeTtsProvider();
   const result = await provider.synthesize({
@@ -610,7 +821,8 @@ router.post('/api/tts', async (ctx) => {
 
 /* -------- 旅行模块 -------- */
 router.get('/api/travel', (ctx) => {
-  const pet = requirePet(ctx.query.get('petId'));
+  const auth = authOf(ctx.req);
+  const pet = requirePet(ctx.query.get('petId') ?? repos.getActivePet(auth.userId)?.id, auth.userId);
   const wishlist = ensureWishlist(repos, pet);
   return {
     ok: true,
@@ -630,7 +842,8 @@ router.post('/api/travel/checkin', async (ctx) => {
   const body = (ctx.body ?? {}) as {
     petId?: string; destinationId?: string; photoUrl?: string | null; lat?: number; lng?: number; note?: string;
   };
-  const pet = requirePet(body.petId);
+  const auth = authOf(ctx.req);
+  const pet = requirePet(body.petId, auth.userId);
   enforceDailyQuota('checkin', pet.ownerId);
   if (!destinationById(body.destinationId ?? '')) throw Object.assign(new Error('DESTINATION_NOT_FOUND'), { status: 404 });
   const outcome = await performCheckin(repos, pet, {
@@ -644,7 +857,8 @@ router.post('/api/travel/checkin', async (ctx) => {
 });
 
 router.get('/api/journal', (ctx) => {
-  const pet = requirePet(ctx.query.get('petId'));
+  const auth = authOf(ctx.req);
+  const pet = requirePet(ctx.query.get('petId') ?? repos.getActivePet(auth.userId)?.id, auth.userId);
   return { ok: true, data: { entries: repos.listJournals(pet.id).slice().reverse() } };
 });
 
@@ -652,7 +866,9 @@ router.post('/api/journal', (ctx) => {
   const body = (ctx.body ?? {}) as {
     petId?: string; checkinId?: string; template?: string; destinationName?: string; extraNote?: string;
   };
-  const pet = requirePet(body.petId);
+  const auth = authOf(ctx.req);
+  const pet = requirePet(body.petId, auth.userId);
+  // 用「属于这只宠物」而不是全局 id 查找，天然完成归属校验
   const checkin = body.checkinId ? repos.listCheckins(pet.id).find((c) => c.id === body.checkinId) : null;
   const destination =
     (checkin ? destinationById(checkin.destinationId) : null) ??
@@ -673,7 +889,9 @@ router.post('/api/journal', (ctx) => {
 
 router.post('/api/postcard', (ctx) => {
   const body = (ctx.body ?? {}) as { petId?: string; checkinId?: string; to?: string; template?: string };
-  const pet = requirePet(body.petId);
+  const auth = authOf(ctx.req);
+  const pet = requirePet(body.petId, auth.userId);
+  // 同上：限定在这只宠物的打卡记录里查找
   const checkin = body.checkinId ? repos.listCheckins(pet.id).find((c) => c.id === body.checkinId) : null;
   const destination = (checkin ? destinationById(checkin.destinationId) : null) ?? DESTINATIONS[0]!;
   const card = generatePostcard({
@@ -691,13 +909,13 @@ router.post('/api/postcard', (ctx) => {
 const CAPSULE_DISCLAIMER =
   '这里生成的是「基于照片的陪伴形象」，不是它本人。它会像它，但不会是它。慢慢来，不着急。';
 
-router.get('/api/capsule', () => {
-  const user = currentUser();
-  return { ok: true, data: { projects: repos.listCapsules(user.id) } };
+router.get('/api/capsule', (ctx) => {
+  const auth = authOf(ctx.req);
+  return { ok: true, data: { projects: repos.listCapsules(auth.userId) } };
 });
 
 router.post('/api/capsule', (ctx) => {
-  const user = currentUser();
+  const user = currentUser(ctx.req);
   enforceDailyQuota('capsule', user.id);
   const body = (ctx.body ?? {}) as { photoUrl?: string; petName?: string; letterTo?: string };
   const project = {
@@ -718,6 +936,9 @@ router.post('/api/capsule', (ctx) => {
 });
 
 router.get('/api/capsule/:id', (ctx) => {
+  const auth = authOf(ctx.req);
+  // 归属校验：否则拿到别人的 capsuleId 就能看到别人上传的旧照
+  assertCapsuleOwned(repos, auth.userId, ctx.params.id!);
   const project = repos.getCapsule(ctx.params.id!);
   if (!project) throw Object.assign(new Error('CAPSULE_NOT_FOUND'), { status: 404 });
   return { ok: true, data: { project, disclaimer: CAPSULE_DISCLAIMER } };
@@ -747,7 +968,8 @@ async function advanceCapsule(id: string): Promise<void> {
 
 /* -------- 云代养 / 双宠同行（第三阶段：先把关系网络打通） -------- */
 router.get('/api/foster', (ctx) => {
-  const pet = requirePet(ctx.query.get('petId'));
+  const auth = authOf(ctx.req);
+  const pet = requirePet(ctx.query.get('petId') ?? repos.getActivePet(auth.userId)?.id, auth.userId);
   const requests = repos.listFosters(pet.id);
   const completed = requests.find((r) => r.status === 'completed');
   return {
@@ -761,7 +983,8 @@ router.get('/api/foster', (ctx) => {
 
 router.post('/api/foster', (ctx) => {
   const body = (ctx.body ?? {}) as { petId?: string; friendName?: string; days?: number };
-  const pet = requirePet(body.petId);
+  const auth = authOf(ctx.req);
+  const pet = requirePet(body.petId, auth.userId);
   const req = {
     id: `fos-${Date.now()}`,
     petId: pet.id,
@@ -778,9 +1001,10 @@ router.post('/api/foster', (ctx) => {
 });
 
 /* -------- 我的 / 订阅 -------- */
-router.get('/api/profile', () => {
-  const user = currentUser();
-  const pet = activePet();
+router.get('/api/profile', (ctx) => {
+  const auth = authOf(ctx.req);
+  const user = auth.account.profile;
+  const pet = activePet(undefined, auth.userId);
   const checkins = pet ? repos.listCheckins(pet.id) : [];
   const journals = pet ? repos.listJournals(pet.id) : [];
   const memories = pet ? repos.listMemories(pet.id) : [];
@@ -803,12 +1027,20 @@ router.get('/api/profile', () => {
 });
 
 router.patch('/api/profile', (ctx) => {
+  const auth = authOf(ctx.req);
   const body = (ctx.body ?? {}) as Partial<UserProfile>;
-  const next = repos.patchUser({
+  /**
+   * 只允许改这些字段。
+   * 白名单而不是展开整个 body：否则客户端可以自行把 tier 改成 pro、
+   * 或把 petSlots 改成 99（权限提升）。
+   */
+  const next = repos.patchProfile(auth.userId, {
     ...(body.nickname ? { nickname: body.nickname } : {}),
     ...(body.avatarEmoji ? { avatarEmoji: body.avatarEmoji } : {}),
     ...(body.minorGuardEnabled !== undefined ? { minorGuardEnabled: body.minorGuardEnabled } : {}),
-    ...(body.monthlySpendLimit !== undefined ? { monthlySpendLimit: body.monthlySpendLimit } : {}),
+    ...(body.monthlySpendLimit !== undefined
+      ? { monthlySpendLimit: Math.max(0, Math.min(5000, Number(body.monthlySpendLimit) || 0)) }
+      : {}),
   });
   return { ok: true, data: { user: next } };
 });
@@ -819,7 +1051,9 @@ router.post('/api/subscribe', (ctx) => {
   const cycle = body.cycle ?? 'monthly';
   const plan = SUBSCRIPTION_PLANS.find((p) => p.tier === tier) ?? SUBSCRIPTION_PLANS[0]!;
   const slots: Record<string, number> = { free: 1, plus: 3, pro: 6 };
-  const user = repos.patchUser({ tier, petSlots: slots[tier] ?? 1 });
+  const auth = authOf(ctx.req);
+  // ⚠️ 这是「模拟开通」：真实上线必须先接支付并在扣款成功后才调用这里
+  const user = repos.patchProfile(auth.userId, { tier, petSlots: slots[tier] ?? 1 });
   return {
     ok: true,
     data: {
@@ -840,7 +1074,18 @@ function multipartBoundary(contentType: string | string[] | undefined): string |
 /* ------------------------------------------------------------------ */
 /* 服务器                                                              */
 /* ------------------------------------------------------------------ */
-const server = createServer(async (req, res) => {
+
+/**
+ * 创建 HTTP 服务器（不 listen）。
+ *
+ * 抽成工厂是为了让测试能在随机端口起一个真实实例，
+ * 从而用真 HTTP 请求验证越权、限流、安全头这类只能在传输层验证的行为。
+ */
+export function createApp() {
+  return createServer(handleRequest);
+}
+
+async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // 安全响应头：所有响应都带（审计 S4）
   applyBaseHeaders(res);
   // 严格 CORS：不匹配白名单就不设 ACAO（审计 S2）
@@ -870,7 +1115,9 @@ const server = createServer(async (req, res) => {
     (req.method === 'GET' ? 'api:read' : 'api:write');
   const rule = ruleFor(bucket);
   const limiterKey = `${bucket}|${clientKey(req)}`;
-  const verdict = rateLimitStore.hit(limiterKey, rule, Date.now());
+  const verdict = rateLimitDisabled()
+    ? { allowed: true, remaining: rule.max, retryAfterMs: 0, limit: rule.max }
+    : rateLimitStore.hit(limiterKey, rule, Date.now());
   if (!verdict.allowed) {
     const retryAfterSec = Math.ceil(verdict.retryAfterMs / 1000);
     res.setHeader('retry-after', String(retryAfterSec));
@@ -885,7 +1132,9 @@ const server = createServer(async (req, res) => {
   try {
     let body: unknown = null;
     let rawBody: Buffer | null = null;
-    if (req.method && ['POST', 'PATCH', 'PUT'].includes(req.method)) {
+    // DELETE 也允许带 body：注销账号需要「确认串 + 密码」，
+    // 放在 query 里会进访问日志与浏览器历史，不合适。
+    if (req.method && ['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) {
       if (multipartBoundary(req.headers['content-type'])) {
         // 手机拍照上传走 multipart：必须按字节读，转字符串会破坏图片
         rawBody = await readRawBody(req, 30 * 1024 * 1024);
@@ -912,9 +1161,13 @@ const server = createServer(async (req, res) => {
     const err = error as Error & { status?: number; message: string };
     const status = err.status ?? 500;
     if (status >= 500) console.error('[ruatrip:error]', err);
-    sendError(res, status, err.message || 'INTERNAL_ERROR', humanizeError(err.message));
+    // 校验失败的接口把 detail 带上，前端才能给出具体原因（如密码强度要求）
+    const extra = (err as Error & { detail?: unknown; quota?: unknown }).detail !== undefined
+      ? { detail: (err as Error & { detail?: unknown }).detail }
+      : {};
+    sendError(res, status, err.message || 'INTERNAL_ERROR', humanizeError(err.message), extra);
   }
-});
+}
 
 function humanizeError(code: string): string {
   const map: Record<string, string> = {
@@ -934,6 +1187,18 @@ function humanizeError(code: string): string {
     INVALID_MULTIPART: '上传格式不正确，请重试。',
     INVALID_IMAGE: '这个文件不是可用的图片。',
     FORBIDDEN: '没有权限操作这个文件。',
+    AUTH_REQUIRED: '需要先登录。',
+    INVALID_SESSION: '登录状态无效，请重新登录。',
+    SESSION_EXPIRED: '登录已过期，请重新登录。',
+    SESSION_REVOKED: '密码已修改，请重新登录。',
+    ACCOUNT_NOT_FOUND: '账号不存在。',
+    INVALID_CREDENTIALS: '邮箱或密码不正确。',
+    EMAIL_TAKEN: '这个邮箱已经注册过了。',
+    WEAK_PASSWORD: '密码强度不够。',
+    CONFIRM_REQUIRED: '请输入 DELETE 以确认注销。',
+    PET_ID_REQUIRED: '缺少 petId。',
+    CONVERSATION_NOT_FOUND: '没有这个会话。',
+    CHECKIN_NOT_FOUND: '没有这条打卡记录。',
     JOB_NOT_FOUND: '没有这个生成任务。',
   };
   return map[code] ?? code;
@@ -947,7 +1212,15 @@ function humanizeError(code: string): string {
  */
 await store.init();
 
-server.listen(config.port, () => {
+/** 是否作为主程序运行（被 import 时不自动 listen，便于测试） */
+const isMainModule = (() => {
+  const entry = process.argv[1] ?? '';
+  return entry.endsWith('index.ts') || entry.endsWith('index.js');
+})();
+
+const server = createApp();
+
+if (isMainModule) server.listen(config.port, () => {
   if (webDistAvailable()) console.log('     已托管前端构建产物：apps/web/dist');
   else console.log('     未发现前端构建产物（跑 npm run build 后可由本服务同源托管）');
   const report = integrationReport();

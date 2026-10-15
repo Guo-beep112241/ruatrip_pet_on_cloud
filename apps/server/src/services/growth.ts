@@ -174,7 +174,7 @@ export function advanceStreak(repos: Repositories, pet: Pet): {
   const streakDays = continues ? repos.getMeta<number>('streakDays', 1) + 1 : 1;
   repos.setMeta('lastActiveDay', today);
   repos.setMeta('streakDays', streakDays);
-  repos.patchUser({ streakDays });
+  repos.patchProfile(pet.ownerId, { streakDays });
 
   const reward = streakRewardFor(streakDays);
   const reunion = !continues && lastKey !== '' && hoursSince(`${lastKey}T12:00:00.000Z`) > 48;
