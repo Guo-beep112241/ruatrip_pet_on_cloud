@@ -88,7 +88,7 @@ class FallbackRigProvider implements RigProvider {
     id: 'universal-skeleton',
     label: '通用骨架模板（绑定兜底）',
     envKeys: [],
-    docsUrl: '/docs/API-INTEGRATION.md',
+    docsUrl: '/docs/API-INTEGRATION.md#0-一分钟总览',
     note: '稀有物种绑定失败时自动套用通用四足/鸟类骨架，动作集降级为通用动作，体验不中断。',
     configured: true,
   };
@@ -116,7 +116,7 @@ class MockRigProvider implements RigProvider {
     id: 'mock',
     label: 'Mock 绑定（按物种套用骨架模板）',
     envKeys: [],
-    docsUrl: '/docs/API-INTEGRATION.md',
+    docsUrl: '/docs/API-INTEGRATION.md#0-一分钟总览',
     note: 'Mock 模式下按物种族直接套用四足/鸟类骨架与通用动作集；接入 Anything World 后同一接口直接替换。',
     get configured() {
       // 只有装了 Anything World 才轮到兜底骨架；否则 Mock 绑定才是正规路径

@@ -48,7 +48,7 @@ class LiveImageProvider implements ImageProvider {
     id: 'custom-image-composer',
     label: '图像合成服务（旅行同框 / 明信片出图）',
     envKeys: ['IMAGE_COMPOSER_API_KEY', 'IMAGE_COMPOSER_BASE_URL'],
-    docsUrl: '/docs/API-INTEGRATION.md#6-图像合成',
+    docsUrl: '/docs/API-INTEGRATION.md#6-图像合成打卡同框-ar-合影-明信片出图',
     note: '通用契约：传入实景照 + 母版参考图 + 光影参数，返回合成图。角色锁定要求带 masterId。',
     get configured() {
       return Boolean(config.imageComposer.apiKey && config.imageComposer.baseUrl);
@@ -100,7 +100,7 @@ class LocalComposeFallback implements ImageProvider {
     id: 'local-svg-composer',
     label: '本地排版合成兜底（SVG，无需 Key）',
     envKeys: [],
-    docsUrl: '/docs/API-INTEGRATION.md',
+    docsUrl: '/docs/API-INTEGRATION.md#0-一分钟总览',
     note: '未接入图像服务时，用 SVG 按场景光影生成「宠物出镜照」占位；构图与文案真实，像素不真实。',
     configured: true,
   };

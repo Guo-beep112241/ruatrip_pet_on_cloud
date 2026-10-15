@@ -201,7 +201,7 @@ class MockMeshProvider implements MeshProvider {
     id: 'mock',
     label: 'Mock 3D 生成（本地占位资产，无需 Key）',
     envKeys: [],
-    docsUrl: '/docs/API-INTEGRATION.md',
+    docsUrl: '/docs/API-INTEGRATION.md#0-一分钟总览',
     note: '不产生真实几何，只登记资产母版元数据并渲染 2D 降级形象；接入 Tripo/Meshy 后同一接口直接替换。',
     configured: true,
   };

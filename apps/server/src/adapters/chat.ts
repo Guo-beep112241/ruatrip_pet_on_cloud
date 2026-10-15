@@ -167,7 +167,7 @@ class MockLlmProvider implements LlmProvider {
     id: 'mock',
     label: 'Mock 人格模板（无需 Key，本地生成）',
     envKeys: [],
-    docsUrl: '/docs/API-INTEGRATION.md',
+    docsUrl: '/docs/API-INTEGRATION.md#0-一分钟总览',
     note: '从性格档案卡的口头禅/喜好/回避话题里拼装回复，保证人设一致；接入真实模型后可无缝替换。',
     configured: true,
   };

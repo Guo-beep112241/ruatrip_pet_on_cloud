@@ -150,7 +150,7 @@ export const asrMeta: ProviderMeta = {
   id: 'server-asr',
   label: '语音识别（按住说话 · 服务端通道）',
   envKeys: ['ASR_API_KEY', 'ASR_BASE_URL', 'ASR_MODEL'],
-  docsUrl: '/docs/API-INTEGRATION.md',
+  docsUrl: '/docs/API-INTEGRATION.md#0-一分钟总览',
   note: '前端默认使用浏览器 SpeechRecognition（零成本、低延迟）；配置服务端通道是为了方言与口音容错。',
   get configured() {
     return Boolean(config.asr.apiKey && config.asr.baseUrl);
