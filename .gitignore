@@ -9,6 +9,6 @@ build/
 coverage/
 .turbo/
 .vite/
-server/.data/
-apps/server/.data/
+# 运行时数据目录（服务端 REPO_ROOT/.data）
+.data/
 *.tsbuildinfo
