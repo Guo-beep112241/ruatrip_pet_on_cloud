@@ -11,12 +11,39 @@
  *
  * 为什么能直接改 process.env：config.ts 用的是惰性 getter，每次访问都重读环境变量。
  */
-import test from 'node:test';
+import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { existsSync, renameSync } from 'node:fs';
 
 import { activeLlmProvider, completeChat, getLastLlmError } from '../src/adapters/chat.ts';
+import { envFiles, loadDotEnv } from '../src/config.ts';
+
+/**
+ * 测试隔离：把真实的 .env / .env.local 临时改名挪开。
+ * 否则仓库里的 .env 会覆盖用例设置的 process.env，
+ * 导致「没配 key」这类用例在别人机器上莫名其妙失败。
+ */
+const hidden: { from: string; to: string }[] = [];
+
+before(() => {
+  for (const file of envFiles) {
+    if (existsSync(file)) {
+      const parked = `${file}.test-hidden`;
+      renameSync(file, parked);
+      hidden.push({ from: parked, to: file });
+    }
+  }
+  loadDotEnv(true);
+});
+
+after(() => {
+  for (const { from, to } of hidden) {
+    if (existsSync(from)) renameSync(from, to);
+  }
+  loadDotEnv(true);
+});
 
 interface FakeReply {
   status: number;
@@ -205,6 +232,7 @@ test('没配任何 key → 直接用 Mock，且不发起网络请求', async () 
   delete process.env.OPENAI_BASE_URL;
   delete process.env.OPENAI_MODEL;
   delete process.env.ANTHROPIC_API_KEY;
+  loadDotEnv(true);
 
   assert.equal(activeLlmProvider().meta.id, 'mock');
 

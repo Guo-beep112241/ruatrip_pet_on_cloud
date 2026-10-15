@@ -9,6 +9,7 @@
  * 前端永远拿不到任何密钥，只能拿到 IntegrationStatus 清单。
  */
 import { readFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,14 +17,48 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** apps/server/src -> 仓库根 */
 export const REPO_ROOT = resolve(here, '../../..');
 
-let envLoaded = false;
+/**
+ * 哪些变量是进程真实环境给的（不是 .env 文件来的）。
+ * 这些必须始终优先，.env 不允许覆盖它们。
+ */
+const fromRealEnv = new Set(Object.keys(process.env));
 
-/** 极简 .env 读取（无第三方依赖）。已存在的真实环境变量优先，不会被覆盖。 */
-export function loadDotEnv(force = false): void {
-  if (envLoaded && !force) return;
-  envLoaded = true;
-  const candidates = [resolve(REPO_ROOT, '.env'), resolve(REPO_ROOT, '.env.local')];
-  for (const file of candidates) {
+/** 上一轮由 .env 文件注入的 key，用于处理「删掉即失效」 */
+let previouslyFromFiles = new Set<string>();
+
+/** .env 候选路径；测试可覆盖 envFilePath 来隔离真实文件 */
+export const envFiles = [resolve(REPO_ROOT, '.env'), resolve(REPO_ROOT, '.env.local')];
+export const envFilePath = envFiles[0]!;
+
+let loadedSignature = '';
+let lastObservedSignature = '';
+
+/**
+ * 文件指纹：**基于内容**而不是时间戳。
+ * 用 mtime 会在「同一毫秒内连续写两次」时漏判（文件系统时间戳精度有限），
+ * 内容哈希没有这个盲区，代价是每次读配置多一次几 KB 的文件读取——可以接受。
+ */
+function envSignature(): string {
+  const hash = createHash('sha1');
+  for (const file of envFiles) {
+    if (!existsSync(file)) {
+      hash.update(`${file}:absent\n`);
+      continue;
+    }
+    hash.update(`${file}:`);
+    hash.update(readFileSync(file));
+    hash.update('\n');
+  }
+  return hash.digest('hex');
+}
+
+/**
+ * 逐个解析 .env 文件并写进 process.env。
+ * 真实环境变量优先；.env 里被注释掉或删掉的 key 会被撤销，保证「删掉即失效」。
+ */
+function applyEnvFiles(): void {
+  const fromFiles = new Map<string, string>();
+  for (const file of envFiles) {
     if (!existsSync(file)) continue;
     const text = readFileSync(file, 'utf8');
     for (const rawLine of text.split(/\r?\n/)) {
@@ -39,14 +74,40 @@ export function loadDotEnv(force = false): void {
       ) {
         value = value.slice(1, -1);
       }
-      if (process.env[key] === undefined) process.env[key] = value;
+      if (key) fromFiles.set(key, value);
     }
   }
+
+  for (const [key, value] of fromFiles) {
+    if (fromRealEnv.has(key)) continue; // 真实环境优先
+    process.env[key] = value;
+  }
+  // 上一轮由文件注入、这一轮已不存在的 key → 撤销
+  for (const key of previouslyFromFiles) {
+    if (!fromFiles.has(key) && !fromRealEnv.has(key)) delete process.env[key];
+  }
+  previouslyFromFiles = new Set(fromFiles.keys());
 }
+
+/**
+ * 加载 .env。每次调用都会检查文件指纹，**只有变化时才重新解析**，
+ * 所以可以安全地在每次读配置时调用（stat 的成本远低于 readFile）。
+ */
+export function loadDotEnv(force = false): void {
+  lastObservedSignature = envSignature();
+  if (!force && lastObservedSignature === loadedSignature) return;
+  applyEnvFiles();
+  loadedSignature = envSignature();
+}
+
 loadDotEnv();
 
-const str = (key: string, fallback = ''): string => process.env[key]?.trim() || fallback;
+const str = (key: string, fallback = ''): string => {
+  loadDotEnv(); // .env 若被改动，这里会自动重新读取
+  return process.env[key]?.trim() || fallback;
+};
 const num = (key: string, fallback: number): number => {
+  loadDotEnv();
   const parsed = Number(process.env[key]);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
