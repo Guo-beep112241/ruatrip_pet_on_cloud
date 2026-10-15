@@ -56,8 +56,7 @@ export function registerPetRoutes(router: Router, svc: RouteServices): void {
   }
   enforceDailyQuota('petCreate', user.id);
   const body = check(ctx.body, SCHEMAS.createPet);
-  const rawAnswers = (ctx.body as { answers?: Record<string, string[]> })?.answers;
-  const answers = rawAnswers ?? repos.getAnswers() ?? {};
+  const answers = (body.answers as Record<string, string[]> | undefined) ?? repos.getAnswers() ?? {};
   const { pet, job } = createPetFromAnswers(repos, {
     answers,
     name: body.name ?? '小家伙',

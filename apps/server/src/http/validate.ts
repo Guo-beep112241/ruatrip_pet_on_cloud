@@ -17,6 +17,21 @@ export type FieldSpec =
   | { type: 'enum'; values: readonly string[]; required?: boolean; label?: string }
   /** 字符串数组（如问卷答案的多选） */
   | { type: 'stringArray'; required?: boolean; maxItems?: number; maxLength?: number; label?: string }
+  /**
+   * 「维度 → 选项数组」的映射（问卷答案的形状）。
+   * 形如 { species: ['ragdoll'], palette: ['oat','chestnut'] }。
+   * 维度白名单由 services/inference.ts 保证，这里只校验形状与规模。
+   */
+  | {
+      type: 'answerMap';
+      required?: boolean;
+      /** 最多允许几个维度 */
+      maxKeys?: number;
+      /** 每个维度最多几个选项 */
+      maxItems?: number;
+      maxLength?: number;
+      label?: string;
+    }
   /** 允许为 null 的字符串（前端会显式传 null 表示「清除」） */
   | { type: 'nullableString'; max?: number; label?: string }
   /** 图片引用：字符串或 null，长度受限（真正的白名单校验在 storage 层） */
@@ -203,6 +218,58 @@ export function validate<S extends Schema>(input: unknown, schema: S): Infer<S> 
           break;
         }
         out[field] = raw;
+        break;
+      }
+
+      case 'answerMap': {
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+          issues.push({ field, message: `${label} 必须是「维度 → 选项」的对象` });
+          break;
+        }
+        const maxKeys = spec.maxKeys ?? 12;
+        const maxItems = spec.maxItems ?? 8;
+        const maxLength = spec.maxLength ?? 64;
+        const entries = Object.entries(raw as Record<string, unknown>);
+        if (entries.length > maxKeys) {
+          issues.push({ field, message: `${label} 的维度过多（最多 ${maxKeys} 个）` });
+          break;
+        }
+        const cleaned: Record<string, string[]> = {};
+        let bad = false;
+        for (const [dim, value] of entries) {
+          if (dim.length === 0 || dim.length > 32) {
+            issues.push({ field, message: `${label} 里有非法的维度名` });
+            bad = true;
+            break;
+          }
+          if (!Array.isArray(value)) {
+            issues.push({ field, message: `${label} 的「${dim}」必须是数组` });
+            bad = true;
+            break;
+          }
+          if (value.length > maxItems) {
+            issues.push({ field, message: `${label} 的「${dim}」最多 ${maxItems} 项` });
+            bad = true;
+            break;
+          }
+          const items: string[] = [];
+          for (const item of value) {
+            if (typeof item !== 'string') {
+              issues.push({ field, message: `${label} 的「${dim}」里只能填字符串选项 id` });
+              bad = true;
+              break;
+            }
+            if (item.length > maxLength) {
+              issues.push({ field, message: `${label} 的选项 id 过长` });
+              bad = true;
+              break;
+            }
+            items.push(item.trim());
+          }
+          if (bad) break;
+          cleaned[dim] = items.filter(Boolean);
+        }
+        if (!bad) out[field] = cleaned;
         break;
       }
 

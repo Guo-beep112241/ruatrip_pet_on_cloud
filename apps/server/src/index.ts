@@ -13,6 +13,7 @@ import { createPersistenceDriver } from './db/drivers.ts';
 import { Repositories } from './repositories/index.ts';
 import { readJsonBody, readRawBody, Router, sendError, sendJson, type Ctx } from './http/router.ts';
 import { serveStatic, webDistAvailable } from './http/static.ts';
+import { KNOWN_ERROR_CODES, statusForErrorCode } from './http/errors.ts';
 import { API_CSP, applyBaseHeaders, applyCors, contentSecurityPolicy } from './http/security.ts';
 import {
   DEFAULT_DAILY_LIMITS,
@@ -464,8 +465,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     }
   } catch (error) {
     const err = error as Error & { status?: number; message: string };
-    const status = err.status ?? 500;
-    if (status >= 500) console.error('[ruatrip:error]', err);
+    /**
+     * 状态码解析：显式 status 优先，其次查错误码映射表。
+     * 这样 services 层只写错误码（'NOT_ENOUGH_AFFECTION'）也能得到 400，
+     * 而不是被误当成 500 进告警。
+     */
+    const code = err.message || 'INTERNAL_ERROR';
+    const status = statusForErrorCode(code, err.status);
+
+    if (status >= 500) {
+      console.error('[ruatrip:error]', err);
+    } else if (!KNOWN_ERROR_CODES.has(code)) {
+      // 未登记的业务错误码：提示补进映射表，避免悄悄退化成 500
+      console.warn(`[ruatrip:warn] 未登记的错误码 "${code}" 已按 ${status} 处理，建议加入 http/errors.ts`);
+    }
 
     // 参数校验失败：把每个字段的问题都带上，前端可以逐个标红
     if (err instanceof ValidationError) {
@@ -478,7 +491,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     // 其它业务错误把 detail 带上（如密码强度要求、限额原因）
     const detail = (err as Error & { detail?: unknown }).detail;
     const extra = detail !== undefined ? { detail } : {};
-    sendError(res, status, err.message || 'INTERNAL_ERROR', humanizeError(err.message), extra);
+    sendError(res, status, code, humanizeError(code), extra);
   }
 }
 

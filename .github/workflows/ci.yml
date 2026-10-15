@@ -1,0 +1,90 @@
+# ============================================================
+# CI（审计 O2）
+#
+# 每次 push / PR 都跑完整质量门：
+#   typecheck → test → build → 生产模式冒烟
+# 其中「生产模式冒烟」会真的起一次服务并请求接口，
+# 能抓到「类型和测试都过但服务起不来」这类问题（配置校验、驱动初始化等）。
+# ============================================================
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # 同一分支的新提交会取消上一次未完成的运行，省额度
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: typecheck / test / build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        # 22 是 engines 的下限（node:sqlite 从 22.5 起可用）
+        node: ['22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 单元与集成测试
+        run: npm test
+
+      - name: 构建前端
+        run: npm run build
+
+      - name: 生产模式冒烟
+        env:
+          NODE_ENV: production
+          # CI 里必须显式给一个密钥：生产模式缺它会拒绝启动（这是有意设计）
+          SESSION_SECRET: ci-only-secret-at-least-32-characters-long
+          AUTH_MODE: required
+          # 前面没有网关，限流保持开启
+          RATE_LIMIT_DISABLED: ''
+          PORT: '8787'
+        run: |
+          set -euo pipefail
+          npm start > /tmp/server.log 2>&1 &
+          SERVER_PID=$!
+          # 等服务起来（最多 30 秒）
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/api/health > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          echo "--- 健康检查 ---"
+          curl -fsS http://127.0.0.1:8787/api/health | head -c 400
+          echo
+          echo "--- 认证状态 ---"
+          curl -fsS http://127.0.0.1:8787/api/auth/status | head -c 200
+          echo
+          echo "--- 首页（前端构建产物是否被托管） ---"
+          curl -fsS -o /dev/null -w "GET / → %{http_code}\n" http://127.0.0.1:8787/
+          echo "--- 安全头抽查 ---"
+          curl -fsS -D - -o /dev/null http://127.0.0.1:8787/api/health | grep -iE "content-security-policy|x-content-type-options" || true
+          kill $SERVER_PID || true
+          echo "--- 服务端日志 ---"
+          tail -30 /tmp/server.log
+
+      - name: 失败时输出服务端日志
+        if: failure()
+        run: |
+          echo "--- /tmp/server.log ---"
+          cat /tmp/server.log 2>/dev/null || echo "(无日志)"

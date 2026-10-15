@@ -11,11 +11,14 @@ import { validate, type Schema } from '../http/validate.ts';
 
 export const SCHEMAS = {
   survey: {
-    answers: { type: 'stringArray', label: '问卷答案', maxItems: 12, maxLength: 64 },
+    // 问卷答案是「维度 → 选项数组」的映射，不是扁平的字符串数组
+    answers: { type: 'answerMap', label: '问卷答案', required: true, maxKeys: 12, maxItems: 8, maxLength: 64 },
   },
   createPet: {
     name: { type: 'string', label: '名字', min: 1, max: 12, required: true },
     callName: { type: 'string', label: '昵称', max: 12 },
+    // 创建时前端会把问卷答案一起带上（也可能不带，用已保存的答案）
+    answers: { type: 'answerMap', label: '问卷答案', maxKeys: 12, maxItems: 8, maxLength: 64 },
   },
   patchPet: {
     petId: { type: 'string', label: 'petId', max: 64, required: true },

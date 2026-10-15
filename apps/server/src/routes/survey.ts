@@ -7,6 +7,7 @@
  */
 import { PREFERENCE_QUESTIONS } from '../../../../packages/shared/src/catalog.ts';
 import { inferProfile, suggestNames } from '../services/inference.ts';
+import type { PreferenceAnswers } from '../../../../packages/shared/src/index.ts';
 import { buildPersonalityCard, buildQuirks, speciesById } from '../services/persona.ts';
 import { check, SCHEMAS } from './schemas.ts';
 import type { Router } from '../http/router.ts';
@@ -42,9 +43,14 @@ export function registerSurveyRoutes(router: Router, svc: RouteServices): void {
   const body = check(ctx.body, SCHEMAS.survey);
   // 问卷答案是多维度的对象（{species:[...]}），这里只做顶层校验，
   // 维度合法性由 services/inference.ts 的白名单保证。
-  const answers = (ctx.body as { answers?: Record<string, string[]> })?.answers ?? {};
-  repos.saveAnswers(answers);
-  const inference = inferProfile(answers);
+  const answers = body.answers;
+  repos.saveAnswers(answers as PreferenceAnswers);
+  /**
+   * answerMap 的静态类型是 unknown：validate 无法对「运行时才知道的维度名」做索引类型。
+   * 这里显式窄化 —— 维度白名单由 services/inference.ts 在运行时保证
+   * （未知维度会被忽略，缺失维度用相似画像补全）。
+   */
+  const inference = inferProfile(answers as PreferenceAnswers);
   const species = speciesById(inference.vector.species);
   const card = buildPersonalityCard(species.id, inference.vector);
   return {
