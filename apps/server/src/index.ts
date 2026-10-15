@@ -23,6 +23,7 @@ import {
   ruleFor,
 } from './http/rateLimit.ts';
 import { MultipartError, parseBoundary, parseMultipart } from './http/multipart.ts';
+import { validate, ValidationError, type Schema } from './http/validate.ts';
 import {
   AuthError,
   assertCapsuleOwned,
@@ -45,6 +46,7 @@ import {
 import { hasObjectStorage } from './config.ts';
 import { buildKey, createStorage, decodeImage, validateImageRef } from './storage/index.ts';
 import { integrationReport } from './adapters/registry.ts';
+import { activeLlmProvider } from './adapters/chat.ts';
 import {
   DESTINATIONS,
   PREFERENCE_QUESTIONS,
@@ -281,9 +283,9 @@ router.get('/api/auth/status', (ctx) => {
 
 /** 注册 */
 router.post('/api/auth/register', async (ctx) => {
-  const body = (ctx.body ?? {}) as { email?: string; password?: string; nickname?: string };
+  const body = check(ctx.body, SCHEMAS.register);
   const email = normalizeEmail(body.email);
-  const password = typeof body.password === 'string' ? body.password : '';
+  const password = body.password;
 
   const issues = passwordIssues(password);
   if (issues.length) {
@@ -312,9 +314,9 @@ router.post('/api/auth/register', async (ctx) => {
 
 /** 登录 */
 router.post('/api/auth/login', async (ctx) => {
-  const body = (ctx.body ?? {}) as { email?: string; password?: string };
+  const body = check(ctx.body, SCHEMAS.login);
   const email = normalizeEmail(body.email);
-  const password = typeof body.password === 'string' ? body.password : '';
+  const password = body.password;
 
   const account = repos.getAccountByEmail(email);
   /**
@@ -352,10 +354,10 @@ router.get('/api/auth/me', (ctx) => {
 router.post('/api/auth/password', async (ctx) => {
   const auth = authOf(ctx.req);
   if (!auth.authenticated) throw Object.assign(new Error('AUTH_REQUIRED'), { status: 401 });
-  const body = (ctx.body ?? {}) as { currentPassword?: string; newPassword?: string };
+  const body = check(ctx.body, SCHEMAS.changePassword);
 
-  const current = typeof body.currentPassword === 'string' ? body.currentPassword : '';
-  const next = typeof body.newPassword === 'string' ? body.newPassword : '';
+  const current = body.currentPassword ?? '';
+  const next = body.newPassword;
 
   // 遗留账号（无密码哈希）：允许直接设置新密码，完成「认领」
   if (auth.account.passwordHash) {
@@ -384,7 +386,7 @@ router.post('/api/auth/password', async (ctx) => {
 router.delete('/api/auth/account', async (ctx) => {
   const auth = authOf(ctx.req);
   if (!auth.authenticated) throw Object.assign(new Error('AUTH_REQUIRED'), { status: 401 });
-  const body = (ctx.body ?? {}) as { password?: string; confirm?: string };
+  const body = check(ctx.body, SCHEMAS.deleteAccount);
   if (body.confirm !== 'DELETE') {
     throw Object.assign(new Error('CONFIRM_REQUIRED'), { status: 400 });
   }
@@ -396,8 +398,193 @@ router.delete('/api/auth/account', async (ctx) => {
   return { ok: true, data: { deleted: true, ...result } };
 });
 
+/* ------------------------------------------------------------------ */
+/* 请求体校验规则（审计 M1）                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 所有写接口的入参规则集中在这里。
+ *
+ * 好处：一眼能看全「哪些字段会被接受」，新增字段必须显式声明；
+ * 未声明的字段会被丢弃 —— 这一点挡住了「客户端顺手塞 tier/ownerId 做权限提升」。
+ */
+const SCHEMAS = {
+  survey: {
+    answers: { type: 'stringArray', label: '问卷答案', maxItems: 12, maxLength: 64 },
+  },
+  createPet: {
+    name: { type: 'string', label: '名字', min: 1, max: 12, required: true },
+    callName: { type: 'string', label: '昵称', max: 12 },
+  },
+  patchPet: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+    name: { type: 'string', label: '名字', min: 1, max: 12 },
+    callName: { type: 'string', label: '昵称', max: 12 },
+    outfitId: { type: 'nullableString', label: '服饰', max: 64 },
+    sceneId: { type: 'string', label: '场景', max: 64 },
+  },
+  interact: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+    action: { type: 'enum', values: ['feed', 'bathe', 'play'] as const, label: '互动类型', required: true },
+    toyId: { type: 'string', label: '玩具', max: 32 },
+  },
+  touchPet: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+    part: { type: 'enum', values: ['head', 'chin', 'tail'] as const, label: '部位' },
+    gesture: { type: 'enum', values: ['tap', 'long', 'double'] as const, label: '手势' },
+  },
+  redeem: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+    itemId: { type: 'string', label: '兑换物', max: 64, required: true },
+  },
+  chat: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+    conversationId: { type: 'string', label: '会话', max: 64 },
+    text: { type: 'string', label: '内容', min: 1, max: 500, required: true },
+    layer: { type: 'enum', values: ['auto', 'instant', 'scene', 'free', 'memory'] as const, label: '分层' },
+    viaVoice: { type: 'boolean', label: '语音输入' },
+  },
+  tts: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+    text: { type: 'string', label: '文本', min: 1, max: 300, required: true },
+  },
+  checkin: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+    destinationId: { type: 'string', label: '目的地', max: 48, required: true },
+    photoUrl: { type: 'imageRef', label: '照片' },
+    lat: { type: 'number', label: '纬度', min: -90, max: 90 },
+    lng: { type: 'number', label: '经度', min: -180, max: 180 },
+    note: { type: 'string', label: '备注', max: 200 },
+  },
+  journal: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+    checkinId: { type: 'string', label: '打卡记录', max: 64 },
+    template: { type: 'enum', values: ['warm-paper', 'polaroid', 'magazine', 'minimal'] as const, label: '模板' },
+    destinationName: { type: 'string', label: '目的地', max: 48 },
+    extraNote: { type: 'string', label: '补充', max: 300 },
+  },
+  postcard: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+    checkinId: { type: 'string', label: '打卡记录', max: 64 },
+    to: { type: 'string', label: '收件人', max: 32 },
+    template: { type: 'enum', values: ['postcard-classic', 'instagram-grid', 'wechat-moments'] as const, label: '模板' },
+  },
+  capsule: {
+    photoUrl: { type: 'imageRef', label: '旧照', required: true },
+    petName: { type: 'string', label: '名字', min: 1, max: 24, required: true },
+    letterTo: { type: 'string', label: '想说的话', max: 400 },
+  },
+  foster: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+    friendName: { type: 'string', label: '好友昵称', max: 24, required: true },
+    days: { type: 'number', label: '天数', min: 1, max: 14, integer: true },
+  },
+  patchProfile: {
+    nickname: { type: 'string', label: '昵称', min: 1, max: 24 },
+    avatarEmoji: { type: 'string', label: '头像', max: 8 },
+    minorGuardEnabled: { type: 'boolean', label: '未成年人保护' },
+    monthlySpendLimit: { type: 'number', label: '月消费上限', min: 0, max: 5000 },
+  },
+  subscribe: {
+    tier: { type: 'enum', values: ['free', 'plus', 'pro'] as const, label: '档位' },
+    cycle: { type: 'enum', values: ['monthly', 'yearly'] as const, label: '周期' },
+  },
+  register: {
+    email: { type: 'string', label: '邮箱', min: 5, max: 254, required: true },
+    password: { type: 'string', label: '密码', min: 1, max: 200, required: true },
+    nickname: { type: 'string', label: '昵称', max: 24 },
+  },
+  login: {
+    email: { type: 'string', label: '邮箱', min: 1, max: 254, required: true },
+    password: { type: 'string', label: '密码', min: 1, max: 200, required: true },
+  },
+  changePassword: {
+    currentPassword: { type: 'string', label: '当前密码', max: 200 },
+    newPassword: { type: 'string', label: '新密码', min: 1, max: 200, required: true },
+  },
+  deleteAccount: {
+    password: { type: 'string', label: '密码', max: 200 },
+    confirm: { type: 'string', label: '确认串', required: true, max: 16 },
+  },
+  petIdQuery: {
+    petId: { type: 'string', label: 'petId', max: 64, required: true },
+  },
+} satisfies Record<string, Schema>;
+
+/** 校验入口：统一抛出带 issues 的 400 */
+function check<S extends Schema>(input: unknown, schema: S): ReturnType<typeof validate<S>> {
+  return validate(input, schema);
+}
+
 /* -------- 引导与基础数据 -------- */
-router.get('/api/health', () => ({ ok: true, data: { status: 'up', time: nowIso(), env: config.env } }));
+/**
+ * 健康检查（审计 M5）。
+ *
+ * 旧版只回 `{status:'up'}`，即使数据源或对象存储已经坏掉也报健康，
+ * 平台不会重启、告警也不会响。
+ *
+ * 现在真实探测依赖，并且区分两种语义：
+ *   - status: 'ok'       —— 全部正常
+ *   - status: 'degraded' —— 核心可用但依赖异常（仍返回 200，避免被平台误杀）
+ *   - status: 'error'    —— 核心不可用（返回 503，让平台重启或摘流量）
+ */
+router.get('/api/health', async () => {
+  const checks: Record<string, { ok: boolean; detail?: string }> = {};
+
+  // 1. 持久化：能否正常读写
+  try {
+    const ok = await persistenceChoice.driver.healthy();
+    checks.persistence = {
+      ok,
+      detail: `${persistenceChoice.description}${ok ? '' : '（不可用）'}`,
+    };
+  } catch (error) {
+    checks.persistence = { ok: false, detail: String(error).slice(0, 120) };
+  }
+
+  // 2. 最近一次落盘是否失败
+  const writeError = store.writeError;
+  checks.lastWrite = writeError
+    ? { ok: false, detail: writeError.message.slice(0, 120) }
+    : { ok: true };
+
+  // 3. 对象存储
+  try {
+    const ok = await storage.healthy();
+    checks.storage = { ok, detail: `${storage.driver} 驱动${ok ? '' : '（不可用）'}` };
+  } catch (error) {
+    checks.storage = { ok: false, detail: String(error).slice(0, 120) };
+  }
+
+  // 4. 大模型通道（只报是否配置，不实际调用 —— 健康检查不该花钱）
+  const llmProvider = activeLlmProvider();
+  checks.llm = {
+    ok: true,
+    detail: llmProvider.meta.id === 'mock' ? 'Mock 模式（未配 key）' : `已接入 ${llmProvider.meta.id}`,
+  };
+
+  const persistenceOk = checks.persistence?.ok !== false;
+  const storageOk = checks.storage?.ok !== false;
+  const writeOk = checks.lastWrite?.ok !== false;
+  const status = !persistenceOk || !writeOk ? 'error' : storageOk ? 'ok' : 'degraded';
+
+  const body = {
+    ok: true,
+    data: {
+      status,
+      time: nowIso(),
+      env: config.env,
+      uptimeSec: Math.round(process.uptime()),
+      driver: store.driverKind,
+      /** 数据规模，用于发现异常膨胀（例如图片又被塞进 JSON） */
+      dataBytes: store.sizeBytes(),
+      checks,
+    },
+  };
+
+  // 核心不可用时返回 503：平台会据此重启或摘掉流量
+  return status === 'error' ? { __status: 503, __body: body } : body;
+});
 
 router.get('/api/bootstrap', (ctx) => {
   const auth = authOf(ctx.req);
@@ -578,8 +765,10 @@ router.get('/api/survey', () => ({
 }));
 
 router.post('/api/survey', (ctx) => {
-  const body = (ctx.body ?? {}) as { answers?: Record<string, string[]> };
-  const answers = body.answers ?? {};
+  const body = check(ctx.body, SCHEMAS.survey);
+  // 问卷答案是多维度的对象（{species:[...]}），这里只做顶层校验，
+  // 维度合法性由 services/inference.ts 的白名单保证。
+  const answers = (ctx.body as { answers?: Record<string, string[]> })?.answers ?? {};
   repos.saveAnswers(answers);
   const inference = inferProfile(answers);
   const species = speciesById(inference.vector.species);
@@ -625,8 +814,9 @@ router.post('/api/pet', (ctx) => {
     throw Object.assign(new Error('PET_SLOT_LIMIT'), { status: 403, detail: slot.message });
   }
   enforceDailyQuota('petCreate', user.id);
-  const body = (ctx.body ?? {}) as { answers?: Record<string, string[]>; name?: string; callName?: string };
-  const answers = body.answers ?? repos.getAnswers() ?? {};
+  const body = check(ctx.body, SCHEMAS.createPet);
+  const rawAnswers = (ctx.body as { answers?: Record<string, string[]> })?.answers;
+  const answers = rawAnswers ?? repos.getAnswers() ?? {};
   const { pet, job } = createPetFromAnswers(repos, {
     answers,
     name: body.name ?? '小家伙',
@@ -645,7 +835,7 @@ router.get('/api/pet', (ctx) => {
 });
 
 router.patch('/api/pet', (ctx) => {
-  const body = (ctx.body ?? {}) as { petId?: string; name?: string; callName?: string; outfitId?: string | null; sceneId?: string };
+  const body = check(ctx.body, SCHEMAS.patchPet);
   const auth = authOf(ctx.req);
   const pet = requirePet(body.petId, auth.userId);
   const next: Pet = {
@@ -703,8 +893,8 @@ router.get('/api/pet/mood', (ctx) => {
 
 /* -------- 互动（好感度核心循环） -------- */
 router.post('/api/interact', (ctx) => {
-  const body = (ctx.body ?? {}) as { petId?: string; action?: 'feed' | 'bathe' | 'play'; toyId?: string };
-  const action = body.action ?? 'feed';
+  const body = check(ctx.body, SCHEMAS.interact);
+  const action = body.action;
   const auth = authOf(ctx.req);
   let pet = requirePet(body.petId, auth.userId);
 
@@ -739,7 +929,7 @@ router.post('/api/interact', (ctx) => {
 
 /** 抚摸部位：点击身体不同部位有不同反应（说明书 6.3 交互细节） */
 router.post('/api/interact/pet', (ctx) => {
-  const body = (ctx.body ?? {}) as { petId?: string; part?: 'head' | 'chin' | 'tail'; gesture?: 'tap' | 'long' | 'double' };
+  const body = check(ctx.body, SCHEMAS.touchPet);
   const auth = authOf(ctx.req);
   const pet = requirePet(body.petId, auth.userId);
   const key =
@@ -785,7 +975,7 @@ router.get('/api/shop', (ctx) => {
 });
 
 router.post('/api/shop/redeem', (ctx) => {
-  const body = (ctx.body ?? {}) as { petId?: string; itemId?: string };
+  const body = check(ctx.body, SCHEMAS.redeem);
   const auth = authOf(ctx.req);
   const pet = requirePet(body.petId, auth.userId);
   const result = redeem(repos, pet, body.itemId ?? '');
@@ -812,9 +1002,9 @@ router.get('/api/chat', (ctx) => {
 });
 
 router.post('/api/chat', async (ctx) => {
-  const body = (ctx.body ?? {}) as {
-    petId?: string; conversationId?: string; text?: string; layer?: string; viaVoice?: boolean;
-  };
+  // 先校验参数再查归属：否则「text 太长」会被报成「宠物不存在」，
+  // 用户拿到的是误导性提示。
+  const body = check(ctx.body, SCHEMAS.chat);
   const auth = authOf(ctx.req);
   const pet = requirePet(body.petId, auth.userId);
   enforceDailyQuota('chat', pet.ownerId);
@@ -873,9 +1063,7 @@ router.get('/api/travel', (ctx) => {
 });
 
 router.post('/api/travel/checkin', async (ctx) => {
-  const body = (ctx.body ?? {}) as {
-    petId?: string; destinationId?: string; photoUrl?: string | null; lat?: number; lng?: number; note?: string;
-  };
+  const body = check(ctx.body, SCHEMAS.checkin);
   const auth = authOf(ctx.req);
   const pet = requirePet(body.petId, auth.userId);
   enforceDailyQuota('checkin', pet.ownerId);
@@ -897,9 +1085,7 @@ router.get('/api/journal', (ctx) => {
 });
 
 router.post('/api/journal', (ctx) => {
-  const body = (ctx.body ?? {}) as {
-    petId?: string; checkinId?: string; template?: string; destinationName?: string; extraNote?: string;
-  };
+  const body = check(ctx.body, SCHEMAS.journal);
   const auth = authOf(ctx.req);
   const pet = requirePet(body.petId, auth.userId);
   // 用「属于这只宠物」而不是全局 id 查找，天然完成归属校验
@@ -922,7 +1108,7 @@ router.post('/api/journal', (ctx) => {
 });
 
 router.post('/api/postcard', (ctx) => {
-  const body = (ctx.body ?? {}) as { petId?: string; checkinId?: string; to?: string; template?: string };
+  const body = check(ctx.body, SCHEMAS.postcard);
   const auth = authOf(ctx.req);
   const pet = requirePet(body.petId, auth.userId);
   // 同上：限定在这只宠物的打卡记录里查找
@@ -951,7 +1137,7 @@ router.get('/api/capsule', (ctx) => {
 router.post('/api/capsule', (ctx) => {
   const user = currentUser(ctx.req);
   enforceDailyQuota('capsule', user.id);
-  const body = (ctx.body ?? {}) as { photoUrl?: string; petName?: string; letterTo?: string };
+  const body = check(ctx.body, SCHEMAS.capsule);
   const project = {
     id: `cap-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     userId: user.id,
@@ -1016,7 +1202,7 @@ router.get('/api/foster', (ctx) => {
 });
 
 router.post('/api/foster', (ctx) => {
-  const body = (ctx.body ?? {}) as { petId?: string; friendName?: string; days?: number };
+  const body = check(ctx.body, SCHEMAS.foster);
   const auth = authOf(ctx.req);
   const pet = requirePet(body.petId, auth.userId);
   const req = {
@@ -1074,7 +1260,7 @@ router.get('/api/profile', (ctx) => {
 
 router.patch('/api/profile', (ctx) => {
   const auth = authOf(ctx.req);
-  const body = (ctx.body ?? {}) as Partial<UserProfile>;
+  const body = check(ctx.body, SCHEMAS.patchProfile);
   /**
    * 只允许改这些字段。
    * 白名单而不是展开整个 body：否则客户端可以自行把 tier 改成 pro、
@@ -1105,8 +1291,8 @@ router.patch('/api/profile', (ctx) => {
  */
 router.post('/api/subscribe', (ctx) => {
   const auth = authOf(ctx.req);
-  const body = (ctx.body ?? {}) as { tier?: SubscriptionTier; cycle?: 'monthly' | 'yearly' };
-  const tier = body.tier ?? 'free';
+  const body = check(ctx.body, SCHEMAS.subscribe);
+  const tier: SubscriptionTier = body.tier ?? 'free';
   const cycle = body.cycle ?? 'monthly';
 
   const plan = SUBSCRIPTION_PLANS.find((p) => p.tier === tier);
@@ -1261,16 +1447,30 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     if (result !== null && !res.writableEnded) {
       // API 响应不需要任何外部来源
       if (!res.hasHeader('content-security-policy')) res.setHeader('content-security-policy', API_CSP);
-      sendJson(res, 200, result);
+      // handler 可以返回 { __status } 包裹来指定状态码（健康检查用 503 触发平台重启）
+      const wrapped = result as { __status?: number; __body?: unknown };
+      if (typeof wrapped.__status === 'number' && '__body' in wrapped) {
+        sendJson(res, wrapped.__status, wrapped.__body);
+      } else {
+        sendJson(res, 200, result);
+      }
     }
   } catch (error) {
     const err = error as Error & { status?: number; message: string };
     const status = err.status ?? 500;
     if (status >= 500) console.error('[ruatrip:error]', err);
-    // 校验失败的接口把 detail 带上，前端才能给出具体原因（如密码强度要求）
-    const extra = (err as Error & { detail?: unknown; quota?: unknown }).detail !== undefined
-      ? { detail: (err as Error & { detail?: unknown }).detail }
-      : {};
+
+    // 参数校验失败：把每个字段的问题都带上，前端可以逐个标红
+    if (err instanceof ValidationError) {
+      sendError(res, 400, 'VALIDATION_FAILED', err.issues.map((i) => i.message).join('；'), {
+        issues: err.issues,
+      });
+      return;
+    }
+
+    // 其它业务错误把 detail 带上（如密码强度要求、限额原因）
+    const detail = (err as Error & { detail?: unknown }).detail;
+    const extra = detail !== undefined ? { detail } : {};
     sendError(res, status, err.message || 'INTERNAL_ERROR', humanizeError(err.message), extra);
   }
 }
@@ -1286,6 +1486,7 @@ function humanizeError(code: string): string {
     SCENE_LOCKED: '这个场景还没有解锁。',
     PAYLOAD_TOO_LARGE: '上传内容太大了。',
     INVALID_JSON: '请求体不是合法 JSON。',
+    VALIDATION_FAILED: '提交的内容有问题。',
     CAPSULE_NOT_FOUND: '没有这个时光胶囊项目。',
     DAILY_QUOTA_EXCEEDED: '今天的额度用完了，明天再来吧。这是为了保护服务不被人刷爆。',
     RATE_LIMITED: '请求太频繁了，歇一会儿再试。',
@@ -1331,6 +1532,53 @@ const isMainModule = (() => {
 })();
 
 const server = createApp();
+
+/**
+ * 优雅退出（审计 M3）。
+ *
+ * 为什么必须有：数据落盘是防抖 + 异步的，进程被 SIGTERM 直接杀掉会丢掉
+ * 最后一次写入（用户刚做的互动就没了）。云平台滚动更新、容器缩容都会发 SIGTERM。
+ *
+ * 顺序：停止接受新连接 → 等待在途请求 → 落盘并关闭数据库连接 → 退出。
+ * 加超时兜底：卡住也必须退出，否则平台会强杀（那才会丢数据）。
+ */
+async function shutdown(signal: string): Promise<void> {
+  console.log(`\n  收到 ${signal}，正在安全退出…`);
+  const timeout = setTimeout(() => {
+    console.error('  退出超时，强制结束（可能有未落盘的数据）');
+    process.exit(1);
+  }, 8000);
+  timeout.unref();
+
+  try {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      // 没有连接时 close 回调也会触发；已有连接会自然结束
+    });
+    await store.close();
+    console.log('  数据已落盘，驱动已关闭。');
+    clearTimeout(timeout);
+    process.exit(0);
+  } catch (error) {
+    console.error('  退出过程中出错：', error);
+    clearTimeout(timeout);
+    process.exit(1);
+  }
+}
+
+if (isMainModule) {
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.on(signal, () => void shutdown(signal));
+  }
+  // 未捕获异常不要静默：记录后退出，让平台重启（带着完整日志）
+  process.on('uncaughtException', (error) => {
+    console.error('[ruatrip:fatal] 未捕获异常：', error);
+    void shutdown('uncaughtException');
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[ruatrip:fatal] 未处理的 Promise 拒绝：', reason);
+  });
+}
 
 if (isMainModule) server.listen(config.port, () => {
   if (webDistAvailable()) console.log('     已托管前端构建产物：apps/web/dist');
