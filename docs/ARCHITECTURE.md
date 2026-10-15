@@ -41,11 +41,24 @@ RUATRIP_BEST_PET_FRIENDS/
 ├── apps/
 │   ├── server/          # API 服务
 │   │   └── src/
-│   │       ├── config.ts              # 环境变量 + 能力可用性判断
-│   │       ├── db/store.ts            # 原子写入的持久层
-│   │       ├── repositories/index.ts  # ★ 换数据库只改这里
+│   │       ├── index.ts               # 只做：HTTP 处理、安全头、静态托管、启动与优雅退出
+│   │       ├── appContext.ts          # ★ 跨路由共享的实例与辅助函数（单向依赖的汇聚点）
+│   │       ├── config.ts              # 环境变量 + 能力可用性判断（全部为惰性 getter）
+│   │       ├── routes/                # ★ 按业务域拆分的路由（每个文件只关心自己的接口）
+│   │       │   ├── auth.ts catalog.ts upload.ts survey.ts pet.ts interact.ts
+│   │       │   ├── shop.ts chat.ts travel.ts capsule.ts foster.ts profile.ts
+│   │       │   ├── schemas.ts         # ★ 所有写接口的入参规则集中一处
+│   │       │   └── services.ts        # 路由依赖的类型声明
+│   │       ├── db/
+│   │       │   ├── store.ts           # 内存快照 + 增量落盘（防抖/原子/串行）
+│   │       │   ├── driver.ts          # 集合定义与 diff
+│   │       │   └── drivers.ts         # SQLite（默认）/ Postgres / JSON 文件
+│   │       ├── repositories/index.ts  # ★ 换数据库只改这里（含归属校验方法）
+│   │       ├── auth/index.ts          # scrypt 密码哈希 + 无状态 HMAC 会话
 │   │       ├── adapters/              # ★ 换外部供应商只改这里
 │   │       │   ├── chat.ts  mesh.ts  rigging.ts  tts.ts  image.ts
+│   │       │   ├── push.ts            # 推送通道（本地通道 / Web Push）
+│   │       │   ├── analytics.ts       # 埋点（隐私白名单）
 │   │       │   ├── registry.ts        # 接入清单汇总
 │   │       │   └── types.ts
 │   │       ├── services/              # 业务规则
@@ -57,13 +70,24 @@ RUATRIP_BEST_PET_FRIENDS/
 │   │       │   ├── travel.ts     # 打卡、心愿单、徽章、盲盒、时光机
 │   │       │   ├── content.ts    # 手账 / 明信片 / 剧情文案引擎
 │   │       │   ├── pet.ts        # 生成编排 + 商店兑换
-│   │       │   └── petArt.ts     # 降级形象（本地 SVG）
-│   │       └── http/{router,static}.ts
+│   │       │   ├── petArt.ts     # 降级形象（本地 SVG）
+│   │       │   ├── billing.ts    # ★ 消费限额与宠物位配额
+│   │       │   └── care.ts       # ★ 情绪关怀（高强度使用检测）
+│   │       ├── storage/index.ts  # 对象存储：本地磁盘 / S3 兼容（自实现 SigV4）
+│   │       └── http/
+│   │           ├── router.ts static.ts security.ts
+│   │           ├── validate.ts       # ★ 零依赖 schema 校验器
+│   │           ├── rateLimit.ts      # 滑动窗口限流 + 每日成本闸门
+│   │           ├── errors.ts         # ★ 错误码 → HTTP 状态码集中映射
+│   │           ├── logger.ts         # ★ 结构化日志（JSON Lines + 脱敏）
+│   │           ├── startupCheck.ts   # ★ 启动配置校验（fatal/warn/info 三档）
+│   │           ├── multipart.ts      # 零依赖 multipart 解析
+│   │           └── auth.ts           # 会话解析与归属校验
 │   └── web/             # 前端（移动端 + 电脑端同一份代码）
 │       └── src/
 │           ├── api/{client,types}.ts
 │           ├── store/app.ts
-│           ├── hooks/
+│           ├── hooks/{useApi,useHashRouter,useMediaQuery}.ts
 │           ├── components/{AppShell,PetStage,InteractionDock,ui}.tsx
 │           ├── pages/{Onboarding,PetCabin,TruthHut,TravelJournal,CheckinMap,TimeCapsule,Profile}.tsx
 │           └── styles/{global.css,tokens.css(生成)}
@@ -206,13 +230,26 @@ packages/theme/src/tokens.ts        （唯一事实来源：色彩/圆角/字号
 
 ## 9. 自动化测试覆盖
 
-`npm test` 共 32 个用例，分三组：
+`npm test` 共 **208** 个用例（10 + 198），全部基于 `node --test`，不引测试框架：
 
 | 文件 | 数量 | 覆盖 |
 | --- | --- | --- |
 | `packages/shared/tests/rules.test.ts` | 10 | 好感度数值口径、等级曲线、想念值、情绪推导优先级 |
 | `apps/server/tests/persona.test.ts` | 13 | 人格卡、跨物种风格差异、system prompt 完整性、四类内容安全、后置审核、预设池 |
 | `apps/server/tests/llm-provider.test.ts` | 9 | **集成测试**：本地假模型端点验证请求格式、`reasoning_content` 隔离、401/402/404 错误翻译、空回复判定、失败回落、惰性配置免重启 |
+| `apps/server/tests/security.test.ts` | 18 | SVG 注入、CORS 白名单、敏感路径、安全头、限流与每日闸门 |
+| `apps/server/tests/persistence.test.ts` | 16 | 三种驱动的读写、增量 diff、原子写入、重启恢复、脏数据合并 |
+| `apps/server/tests/storage.test.ts` | — | 图片魔数校验、体积上限、键生成、本地与 S3 适配、删除 |
+| `apps/server/tests/auth.test.ts` | 16 | scrypt 哈希、密码强度、会话签发与校验、密码版本吊销、防枚举 |
+| `apps/server/tests/isolation.test.ts` | 16 | **真实 HTTP**：越权读/写全拒、伪造 token、改密码吊销、注销清数据、宠物位与消费限额 |
+| `apps/server/tests/billing.test.ts` | 20 | 未成年人单笔/月上限与硬封顶、宠物位配额、降级保护、台账统计、防绕过 |
+| `apps/server/tests/validate.test.ts` | 15 | 必填、类型不符、非对象体、长度与 trim、枚举白名单、数字范围、未知字段丢弃 |
+| `apps/server/tests/care-analytics.test.ts` | 21 | 关怀的克制性（不唠叨、悲伤优先附渠道）、埋点隐私白名单、推送不假装投递 |
+| `apps/server/tests/logger-errors.test.ts` | 18 | 日志脱敏（含嵌套与循环引用）、JSON Lines、错误码映射、不上报退化为 500 |
+| `apps/server/tests/e2e.test.ts` | 15 | **端到端**：注册 → 问卷 → 孵化 → 互动 → 对话 → 打卡 → 手账 → 商店 → 订阅 → 注销 |
+
+CI 在 Node 22 与 24 上各跑一遍，并额外做一次**生产模式冒烟**
+（真起服务、请求接口、抽查安全头），抓「类型与测试都过但服务起不来」这类问题。
 
 ## 10. 已验证的行为（手工自测记录）
 
