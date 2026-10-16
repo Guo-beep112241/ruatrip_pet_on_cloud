@@ -1,10 +1,16 @@
 # ============================================================
-# Render 一键部署配置
+# Render 一键部署配置（免费档可直接部署）
 #
-# 用法：Render 控制台 → New → Blueprint → 选这个仓库，会自动读取本文件。
-# 说明：这是一个「长驻 Node 服务」，前端由它同源托管，所以只需要一个 Web Service。
-# ⚠️ Render 的免费实例 15 分钟无请求会休眠，下次访问要等约 50 秒冷启动；
-#    想要常驻请改成 plan: starter（约 $7/月）。
+# 用法：Render 控制台 → New + → Blueprint → 选这个仓库，会自动读取本文件。
+#      建好后**不需要填任何环境变量**，直接 Apply（SESSION_SECRET 由 Render 自动生成）。
+#
+# 说明：这是一个「长驻 Node 服务」，前端由它同源托管，所以只需要一个 Web Service：
+#      没有跨域问题，不需要配 CORS_ORIGIN，也不需要配 VITE_API_BASE_URL。
+#
+# ⚠️ 免费档的两个已知限制（解除办法见文件末尾注释）：
+#    1. 15 分钟无请求会休眠，下一个访问者要等约 50 秒冷启动；
+#    2. 容器文件系统是临时的：休眠重启或重新部署后，用户注册的账号与宠物数据会清空。
+#       想保住数据 → 升级 plan 并启用磁盘，或改用 Postgres（docs/DEPLOYMENT.md 3.1）。
 # ============================================================
 
 services:
@@ -12,63 +18,42 @@ services:
     name: ruatrip
     runtime: node
     region: singapore          # 离国内最近；也可选 oregon / frankfurt
-    plan: free                 # 改成 starter 可避免休眠
-    buildCommand: npm ci --no-audit --no-fund && npm run build
+    plan: free                 # 改成 starter 才能挂持久磁盘（见文末 disk 段）
+    # ⚠️ `--include=dev` 不能删：下面的 NODE_ENV=production 会让 npm 默认跳过
+    #    devDependencies，而 vite/typescript（构建前端）与 tsx（启动服务）都在
+    #    devDependencies 里。漏掉它 → 构建阶段就报 "vite: not found"。
+    buildCommand: npm ci --include=dev --no-audit --no-fund && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
-    autoDeploy: true
+    autoDeployTrigger: commit
     envVars:
       - key: NODE_ENV
         value: production
       # Render 会自动注入 PORT，服务端已按 PORT 监听，无需手动设置
+      # 数据目录（相对仓库根解析）。免费档没有磁盘，重新部署会清空；
+      # 以后挂了持久磁盘，把这里改成 /var/data
       - key: DATA_DIR
-        value: /var/data
+        value: ./.data
       # ---- 认证（必填，否则生产环境拒绝启动）----
-      # 在 Render 控制台填一个 32 位以上随机串
+      # 由 Render 自动生成 256 位随机值：不用手填，也不会进 Git
       - key: SESSION_SECRET
-        sync: false
+        generateValue: true
       - key: AUTH_MODE
         value: required
-      # ---- 持久化：建议接 Postgres，见 docs/DEPLOYMENT.md ----
-      - key: DATABASE_URL
-        sync: false
-      # 部署完成后，把你的正式访问地址填进来（用于 CORS 白名单）
-      # 例如 https://ruatrip.onrender.com,https://你的域名.com
-      - key: CORS_ORIGIN
-        sync: false
-      # ---- 以下全部是可选的 AI / 3D / 语音能力，在 Render 控制台里填 ----
-      - key: LLM_API_KEY
-        sync: false
-      - key: LLM_BASE_URL
-        sync: false
-      - key: LLM_MODEL
-        sync: false
-      - key: TRIPO_API_KEY
-        sync: false
-      - key: MESHY_API_KEY
-        sync: false
-      - key: MINIMAX_API_KEY
-        sync: false
-      - key: MINIMAX_GROUP_ID
-        sync: false
-      - key: ELEVENLABS_API_KEY
-        sync: false
-      # ---- 对象存储（可选，不配则用本地磁盘）----
-      - key: STORAGE_ENDPOINT
-        sync: false
-      - key: STORAGE_BUCKET
-        sync: false
-      - key: STORAGE_ACCESS_KEY
-        sync: false
-      - key: STORAGE_SECRET_KEY
-        sync: false
-      - key: STORAGE_REGION
-        value: auto
-      - key: CDN_BASE_URL
-        sync: false
-    disk:
-      # 持久化 JSON 存储，避免每次重新部署数据被清空
-      # ⚠️ 挂载磁盘需要付费实例（starter 及以上）
-      name: ruatrip-data
-      mountPath: /var/data
-      sizeGB: 1
+      # ---- 以下全部可选：一项都不配也能跑 ----
+      # 未配置的能力会自动回落 Mock，并在前端「我的 → 能力接入」里如实标注降级。
+      # 想开启真实通道：Render 控制台 → 你的服务 → Environment，按 docs/API-INTEGRATION.md 添加：
+      #   LLM_API_KEY / LLM_BASE_URL / LLM_MODEL                            对话（推荐 DeepSeek）
+      #   TRIPO_API_KEY / MESHY_API_KEY                                     3D 资产
+      #   MINIMAX_API_KEY / MINIMAX_GROUP_ID / ELEVENLABS_API_KEY           语音
+      #   STORAGE_ENDPOINT / STORAGE_BUCKET / STORAGE_ACCESS_KEY / STORAGE_SECRET_KEY   对象存储
+      #   DATABASE_URL（并执行 npm i pg）                                    Postgres 持久化
+      #   CORS_ORIGIN                                                      仅当前端拆到 Netlify 等独立域名时需要
+
+# ---- 想「数据不丢」：升级到付费实例后，把上面 plan 改成 starter 并启用这段 ----
+#    plan: starter              # 约 $7/月，磁盘只支持付费实例
+#    disk:
+#      name: ruatrip-data
+#      mountPath: /var/data
+#      sizeGB: 1
+#  同时把上面的 DATA_DIR 从 ./.data 改成 /var/data

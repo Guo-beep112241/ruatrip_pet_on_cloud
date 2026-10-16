@@ -143,8 +143,11 @@ STORAGE_DRIVER=file
 
 **为什么 Render 免费实例现在也不丢数据了**：默认驱动是 SQLite，
 但它写在容器文件系统上，**容器重建时依然会丢**。
-所以 Render 上要么升级到带磁盘的实例（`render.yaml` 已配好挂载），
-要么改用 Postgres。这一条在 `render.yaml` 的注释里也标注了。
+所以 Render 上要么升级到带磁盘的实例，要么改用 Postgres。
+
+> ⚠️ 磁盘**只支持付费实例**（starter 起）。`render.yaml` 里的 `disk` 段因此默认注释掉，
+> 保持 `plan: free` 时一键部署不会被平台拒绝；升级到 `starter` 后把 `plan` 与 `disk`
+> 一起放开，并把 `DATA_DIR` 从 `./.data` 改成 `/var/data` 即可（文末注释已写明）。
 
 **架构取舍（重要，避免误判）**：当前是「进程内全量快照 + 增量落盘」，
 不是「每次查询打数据库」。单用户数据量很小（实测 KB 级），读内存延迟最低。

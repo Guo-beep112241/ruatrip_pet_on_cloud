@@ -195,6 +195,13 @@ LLM_MODEL=deepseek-flash
 
 已带 `Dockerfile`、`render.yaml` 与 `.dockerignore`。
 
+**最快路径（全程在浏览器点，不需要本地任何配置）**：Render 控制台 → `New +` → `Blueprint` →
+选本仓库 → `Apply`。`render.yaml` 会自动建好服务并生成 `SESSION_SECRET`，**不需要手填任何环境变量**；
+几分钟后即可拿到 `https://<服务名>.onrender.com`，这个地址就能直接发给别人。
+不配任何 AI key 也能跑：未配置的能力自动回落 Mock，并在前端「我的 → 能力接入」里如实标注降级。
+免费档的两个限制（15 分钟无请求休眠、容器文件系统不持久）与数据保住的三种办法，见
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+
 **国内访问的实测结论**（详细测量数据见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)）：`*.vercel.app` 在国内不可达（实测 3 个域名全部 TCP 连接超时），推荐两条路线：
 
 - **A. 国内轻量服务器 + Docker**（推荐）—— 需要域名与 ICP 备案
